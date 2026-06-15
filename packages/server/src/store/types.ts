@@ -51,6 +51,8 @@ export interface CampaignRecord {
   cpmBidCents: number;
   dailyBudgetCents: number;
   spentTodayCents: number;
+  /** Precise spend accumulator in millicents; source of truth for budget. */
+  spentTodayMillicents: number;
   status: CampaignStatus;
   targetingCountries: string[];
   targetingPlatforms: Platform[];
@@ -76,6 +78,13 @@ export interface EarningsRecord {
   periodStart: Date;
   periodEnd: Date;
   impressionsCount: number;
+  /**
+   * Precise accumulators in millicents (1 cent = 1000 millicents). Optional so
+   * legacy/seeded rows that only carry the rounded cents columns still type;
+   * summarizeEarnings falls back to `*Cents * 1000` when these are absent.
+   */
+  grossMillicents?: number;
+  devShareMillicents?: number;
   grossCents: number;
   devShareCents: number;
   status: EarningsStatus;

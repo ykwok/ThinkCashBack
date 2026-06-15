@@ -3,6 +3,12 @@ import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import type { Platform } from '@thinkcashback/shared';
 import * as schema from '../db/schema.js';
+import {
+  dayPeriod,
+  impressionDevShareMillicents,
+  impressionGrossMillicents,
+  millicentsToWholeCents,
+} from '../lib/earnings.js';
 import type {
   AdServingQuery,
   AdvertiserRecord,
@@ -137,7 +143,7 @@ export class PostgresStore implements Store {
       .where(
         and(
           eq(schema.campaigns.status, 'active'),
-          sql`${schema.campaigns.spentTodayCents} < ${schema.campaigns.dailyBudgetCents}`,
+          sql`${schema.campaigns.spentTodayMillicents} < ${schema.campaigns.dailyBudgetCents} * 1000`,
           sql`(cardinality(${schema.campaigns.targetingPlatforms}) = 0 OR ${query.platform} = ANY(${schema.campaigns.targetingPlatforms}))`,
           query.country
             ? sql`(cardinality(${schema.campaigns.targetingCountries}) = 0 OR ${query.country} = ANY(${schema.campaigns.targetingCountries}))`
@@ -167,35 +173,73 @@ export class PostgresStore implements Store {
   }
 
   async recordImpression(input: RecordImpressionInput): Promise<ImpressionRecord | null> {
-    const inserted = await this.db
-      .insert(schema.impressions)
-      .values({
-        deviceId: input.deviceId,
-        campaignId: input.campaignId,
-        nonce: input.nonce,
-        signature: input.signature,
-        ipHash: input.ipHash,
-        durationMs: input.durationMs,
-        verified: input.verified,
-      })
-      .onConflictDoNothing({
-        target: [schema.impressions.deviceId, schema.impressions.nonce],
-      })
-      .returning();
-
-    if (inserted.length === 0) return null; // duplicate nonce
-    const row = inserted[0];
-
-    if (input.verified) {
-      await this.db
-        .update(schema.campaigns)
-        .set({
-          spentTodayCents: sql`${schema.campaigns.spentTodayCents} + (${schema.campaigns.cpmBidCents} / 1000)`,
-          status: sql`CASE WHEN ${schema.campaigns.spentTodayCents} + (${schema.campaigns.cpmBidCents} / 1000) >= ${schema.campaigns.dailyBudgetCents} THEN 'exhausted' ELSE ${schema.campaigns.status} END`,
+    return this.db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(schema.impressions)
+        .values({
+          deviceId: input.deviceId,
+          campaignId: input.campaignId,
+          nonce: input.nonce,
+          signature: input.signature,
+          ipHash: input.ipHash,
+          durationMs: input.durationMs,
+          verified: input.verified,
         })
-        .where(eq(schema.campaigns.id, input.campaignId));
-    }
-    return mapImpression(row);
+        .onConflictDoNothing({
+          target: [schema.impressions.deviceId, schema.impressions.nonce],
+        })
+        .returning();
+
+      if (inserted.length === 0) return null; // duplicate nonce
+      const row = inserted[0];
+
+      if (input.verified) {
+        // Spend is accumulated in millicents so a sub-cent per-impression amount
+        // (cpm_bid_cents/1000 cents) never truncates to zero. spent_today_cents
+        // is kept as the rounded mirror; budget exhaustion checks millicents.
+        const [campaign] = await tx
+          .update(schema.campaigns)
+          .set({
+            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents}`,
+            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents}) / 1000.0)`,
+            status: sql`CASE WHEN ${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents} >= ${schema.campaigns.dailyBudgetCents} * 1000 THEN 'exhausted' ELSE ${schema.campaigns.status} END`,
+          })
+          .where(eq(schema.campaigns.id, input.campaignId))
+          .returning();
+
+        // Credit the device-owning developer's earnings ledger.
+        const [owner] = await tx
+          .select({
+            developerId: schema.devices.developerId,
+            revShareBps: schema.developers.revShareBps,
+          })
+          .from(schema.devices)
+          .innerJoin(schema.developers, eq(schema.developers.id, schema.devices.developerId))
+          .where(eq(schema.devices.id, input.deviceId));
+
+        if (campaign && owner) {
+          const grossMillicents = impressionGrossMillicents(campaign.cpmBidCents);
+          const devShareMillicents = impressionDevShareMillicents(
+            campaign.cpmBidCents,
+            owner.revShareBps,
+          );
+          const { start, end } = dayPeriod(row.createdAt);
+          await tx.insert(schema.earningsLedger).values({
+            developerId: owner.developerId,
+            campaignId: input.campaignId,
+            periodStart: start,
+            periodEnd: end,
+            impressionsCount: 1,
+            grossMillicents,
+            devShareMillicents,
+            grossCents: millicentsToWholeCents(grossMillicents),
+            devShareCents: millicentsToWholeCents(devShareMillicents),
+            status: 'pending',
+          });
+        }
+      }
+      return mapImpression(row);
+    });
   }
 
   async countRecentImpressions(
@@ -282,6 +326,7 @@ function mapCampaign(row: schema.CampaignRow): CampaignRecord {
     cpmBidCents: row.cpmBidCents,
     dailyBudgetCents: row.dailyBudgetCents,
     spentTodayCents: row.spentTodayCents,
+    spentTodayMillicents: row.spentTodayMillicents,
     status: row.status as CampaignRecord['status'],
     targetingCountries: row.targetingCountries,
     targetingPlatforms: row.targetingPlatforms as Platform[],
@@ -311,6 +356,8 @@ function mapEarnings(row: schema.EarningsRow): EarningsRecord {
     periodStart: row.periodStart,
     periodEnd: row.periodEnd,
     impressionsCount: row.impressionsCount,
+    grossMillicents: row.grossMillicents,
+    devShareMillicents: row.devShareMillicents,
     grossCents: row.grossCents,
     devShareCents: row.devShareCents,
     status: row.status as EarningsRecord['status'],

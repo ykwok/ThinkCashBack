@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import {
+  dayPeriod,
+  impressionDevShareMillicents,
+  impressionGrossMillicents,
+  millicentsToWholeCents,
+} from '../lib/earnings.js';
 import type {
   AdServingQuery,
   AdvertiserRecord,
@@ -123,6 +129,7 @@ export class MemoryStore implements Store {
       cpmBidCents: input.cpmBidCents,
       dailyBudgetCents: input.dailyBudgetCents,
       spentTodayCents: 0,
+      spentTodayMillicents: 0,
       status: 'active',
       targetingCountries: input.targetingCountries,
       targetingPlatforms: input.targetingPlatforms,
@@ -139,7 +146,7 @@ export class MemoryStore implements Store {
   async selectServableCampaigns(query: AdServingQuery): Promise<CampaignRecord[]> {
     return [...this.campaigns.values()]
       .filter((c) => c.status === 'active')
-      .filter((c) => c.spentTodayCents < c.dailyBudgetCents)
+      .filter((c) => c.spentTodayMillicents < c.dailyBudgetCents * 1000)
       .filter(
         (c) => c.targetingPlatforms.length === 0 || c.targetingPlatforms.includes(query.platform),
       )
@@ -186,10 +193,38 @@ export class MemoryStore implements Store {
     if (input.verified) {
       const campaign = this.campaigns.get(input.campaignId);
       if (campaign) {
-        // CPM is per 1000 impressions; one impression spends bid/1000 cents.
-        campaign.spentTodayCents += campaign.cpmBidCents / 1000;
-        if (campaign.spentTodayCents >= campaign.dailyBudgetCents) {
+        // CPM is per 1000 impressions; one impression spends cpm_bid_cents/1000
+        // cents — a sub-cent amount. Accumulate in millicents so it never
+        // truncates, and keep spent_today_cents as the rounded mirror.
+        campaign.spentTodayMillicents += impressionGrossMillicents(campaign.cpmBidCents);
+        campaign.spentTodayCents = millicentsToWholeCents(campaign.spentTodayMillicents);
+        if (campaign.spentTodayMillicents >= campaign.dailyBudgetCents * 1000) {
           campaign.status = 'exhausted';
+        }
+
+        // Credit the device-owning developer's earnings ledger.
+        const device = this.devices.get(input.deviceId);
+        const developer = device ? this.developers.get(device.developerId) : undefined;
+        if (developer) {
+          const grossMillicents = impressionGrossMillicents(campaign.cpmBidCents);
+          const devShareMillicents = impressionDevShareMillicents(
+            campaign.cpmBidCents,
+            developer.revShareBps,
+          );
+          const { start, end } = dayPeriod(record.createdAt);
+          this.earnings.push({
+            id: randomUUID(),
+            developerId: developer.id,
+            campaignId: campaign.id,
+            periodStart: start,
+            periodEnd: end,
+            impressionsCount: 1,
+            grossMillicents,
+            devShareMillicents,
+            grossCents: millicentsToWholeCents(grossMillicents),
+            devShareCents: millicentsToWholeCents(devShareMillicents),
+            status: 'pending',
+          });
         }
       }
     }
