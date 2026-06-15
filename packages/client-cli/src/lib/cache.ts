@@ -10,7 +10,7 @@ export const FALLBACK_ADS: Ad[] = [
     id: "builtin-1",
     headline: "✶ ThinkCashBack — get paid while you think ↗",
     url: "https://thinkcashback.dev",
-    tracking_id: "builtin-1",
+    trackingId: "builtin-1",
   },
 ];
 

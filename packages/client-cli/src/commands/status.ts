@@ -29,9 +29,13 @@ export async function status(): Promise<number> {
     try {
       const api = new ThinkCashBackApi(config);
       const e = await api.getEarnings();
+      const today = e.daily[0];
+      const todayImpressions = today?.impressions ?? 0;
+      const todayCents = today?.devShareCents ?? 0;
+      const totalImpressions = e.daily.reduce((sum, d) => sum + d.impressions, 0);
       console.log("────────────────────");
-      console.log(`Today:  ${e.today_impressions} impressions · ${fmt(e.today_earnings, e.currency)}`);
-      console.log(`Total:  ${e.total_impressions} impressions · ${fmt(e.total_earnings, e.currency)}`);
+      console.log(`Today:  ${todayImpressions} impressions · ${fmtCents(todayCents)}`);
+      console.log(`Total:  ${totalImpressions} impressions · ${fmtCents(e.totalCents)}`);
     } catch {
       console.log("(earnings unavailable — network error)");
     }
@@ -40,6 +44,6 @@ export async function status(): Promise<number> {
   return 0;
 }
 
-function fmt(amount: number, currency: string): string {
-  return `${amount.toFixed(2)} ${currency}`;
+function fmtCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }

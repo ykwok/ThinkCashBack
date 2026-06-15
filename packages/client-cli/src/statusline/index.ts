@@ -18,7 +18,8 @@
 import { ThinkCashBackApi } from "../lib/api";
 import { isRegistered, readConfig } from "../lib/config";
 import { FALLBACK_ADS, mergeAd, readCache, writeCache } from "../lib/cache";
-import { buildSignedImpression } from "../lib/signing";
+import { buildSignedImpression } from "../lib/impression";
+import { currentPlatform } from "../lib/device";
 import { refreshSpinnerVerbs } from "../lib/spinner-update";
 import { Ad, LocalConfig } from "../types";
 
@@ -81,7 +82,7 @@ class StatusLineDaemon {
   private async fetchAd(): Promise<void> {
     try {
       const ad = await this.api.getAd({
-        platform: "claude_code_cli",
+        platform: currentPlatform(),
         country: process.env.THINKCASHBACK_COUNTRY,
         lang: (process.env.LANG || "en").split(/[._]/)[0],
       });
@@ -98,7 +99,9 @@ class StatusLineDaemon {
     try {
       const payload = buildSignedImpression(
         {
-          campaign_id: ad.tracking_id,
+          // The server keys impressions by campaign UUID; `ad.id` is that UUID
+          // while `ad.trackingId` is a per-serve random token (would 404/422).
+          campaign_id: ad.id,
           device_id: this.config.device_id!,
           duration_ms: durationMs,
         },

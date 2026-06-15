@@ -20,6 +20,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@thinkcashback/shared": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {

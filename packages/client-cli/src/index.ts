@@ -26,8 +26,8 @@ program
 
 program
   .command("login")
-  .description("Authenticate with ThinkCashBack")
-  .option("--token <token>", "provide a token directly instead of using the browser")
+  .description("Authenticate with ThinkCashBack via GitHub")
+  .option("--code <code>", "GitHub OAuth code to exchange for a session (non-interactive)")
   .option("--mock", "log in with a mock token (local development)")
   .action((opts) => run(login(opts)));
 

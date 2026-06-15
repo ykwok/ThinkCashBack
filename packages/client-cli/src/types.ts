@@ -3,22 +3,53 @@
  * API contract mirrors the backend (PRO-345).
  */
 
-/** A single ad returned by GET /api/v1/ad. */
+/** Platforms the server accepts (matches the shared `platformSchema` enum). */
+export type Platform = "darwin" | "linux" | "win32";
+
+/**
+ * A single ad returned by GET /api/v1/ad.
+ * Mirrors the server's `AdResponse` (camelCase, `id` is the campaign UUID and
+ * `trackingId` is a per-serve random token — only `id` is valid as a
+ * campaign_id when reporting impressions).
+ */
 export interface Ad {
   id: string;
   headline: string;
   url: string;
-  tracking_id: string;
+  trackingId: string;
 }
 
-/** Response from POST /api/v1/devices. */
+/**
+ * Response from POST /api/v1/devices (inside the `data` envelope).
+ * The server returns the device under a nested object and the (re-issued)
+ * developer credentials at the top level.
+ */
 export interface DeviceRegistration {
-  device_id: string;
-  api_key: string;
-  signing_secret: string;
+  device: {
+    id: string;
+    platform: Platform;
+    createdAt: string;
+  };
+  apiKey: string;
+  signingSecret: string;
 }
 
-/** Payload sent to POST /api/v1/impressions. */
+/** Response from POST /api/v1/auth/github (inside the `data` envelope). */
+export interface GithubAuthResult {
+  token: string;
+  developer: {
+    id: string;
+    githubId: string;
+    email: string;
+  };
+  /** Present only on first login — persist immediately. */
+  credentials: {
+    apiKey: string;
+    signingSecret: string;
+  } | null;
+}
+
+/** Payload sent to POST /api/v1/impressions (matches `impressionReportSchema`). */
 export interface ImpressionPayload {
   campaign_id: string;
   device_id: string;
@@ -27,14 +58,20 @@ export interface ImpressionPayload {
   duration_ms: number;
 }
 
-/** Response from GET /api/v1/me/earnings. */
+/**
+ * Response from GET /api/v1/me/earnings (inside the `data` envelope).
+ * Mirrors the server's `EarningsSummary`: amounts are integer cents.
+ */
 export interface Earnings {
-  currency: string;
-  today_impressions: number;
-  today_earnings: number;
-  total_impressions: number;
-  total_earnings: number;
-  pending_payout: number;
+  totalCents: number;
+  pendingCents: number;
+  paidCents: number;
+  daily: Array<{
+    date: string;
+    impressions: number;
+    grossCents: number;
+    devShareCents: number;
+  }>;
 }
 
 /** Locally stored credentials and settings (~/.thinkcashback/config.json). */

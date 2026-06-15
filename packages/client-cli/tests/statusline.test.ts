@@ -6,7 +6,7 @@ import { isAdVerb } from "../src/lib/settings";
 import { Ad } from "../src/types";
 
 function ad(id: string, headline = `headline ${id}`): Ad {
-  return { id, headline, url: `https://x/${id}`, tracking_id: `t-${id}` };
+  return { id, headline, url: `https://x/${id}`, trackingId: `t-${id}` };
 }
 
 test("mergeAd dedups by id and puts the fresh ad first", () => {

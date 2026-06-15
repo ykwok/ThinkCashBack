@@ -1,19 +1,25 @@
 import * as readline from "readline/promises";
 import { stdin as input, stdout as output } from "process";
+import { ThinkCashBackApi } from "../lib/api";
 import { readConfig, writeConfig } from "../lib/config";
 
 interface LoginOptions {
-  /** Skip the browser and accept a token directly (CI / mock mode). */
-  token?: string;
+  /** GitHub OAuth code to exchange non-interactively (CI / scripted login). */
+  code?: string;
+  /** Skip the network and store a mock token (local dev / offline). */
   mock?: boolean;
 }
 
+const GITHUB_START_URL = "https://thinkcashback.dev/auth/github/start?platform=cli";
+
 /**
- * Authenticate the user.
+ * Authenticate the user against the real server.
  *
- * Real flow: open the browser to the GitHub OAuth start URL and poll for the
- * resulting JWT. To keep the CLI testable and dependency-free, we also support
- * pasting a token manually (`--token`) and a `--mock` mode for local dev.
+ * The browser opens the GitHub OAuth start page; after authorizing, the user
+ * is shown a short OAuth `code` which we exchange at `POST /api/v1/auth/github`
+ * for a session JWT. The JWT (and, on first login, the developer's API key +
+ * signing secret) are persisted locally. `--mock` keeps a dependency-free path
+ * for local development.
  */
 export async function login(opts: LoginOptions = {}): Promise<number> {
   const config = await readConfig();
@@ -24,30 +30,43 @@ export async function login(opts: LoginOptions = {}): Promise<number> {
     return 0;
   }
 
-  if (opts.token) {
-    await writeConfig({ ...config, jwt: opts.token });
-    console.log("✓ Logged in with provided token.");
-    return 0;
+  let code = opts.code;
+  if (!code) {
+    console.log("To authenticate, open this URL in your browser and authorize ThinkCashBack:");
+    console.log("");
+    console.log(`  ${GITHUB_START_URL}`);
+    console.log("");
+    await tryOpenBrowser(GITHUB_START_URL);
+
+    const rl = readline.createInterface({ input, output });
+    try {
+      code = (await rl.question("Paste the code shown after authorizing: ")).trim();
+    } finally {
+      rl.close();
+    }
   }
 
-  console.log("To authenticate, open this URL in your browser and authorize ThinkCashBack:");
-  console.log("");
-  console.log("  https://thinkcashback.dev/auth/github/start?platform=cli");
-  console.log("");
-  await tryOpenBrowser("https://thinkcashback.dev/auth/github/start?platform=cli");
+  if (!code) {
+    console.error("No code entered. Login cancelled.");
+    return 1;
+  }
 
-  const rl = readline.createInterface({ input, output });
   try {
-    const token = (await rl.question("Paste the token shown after authorizing: ")).trim();
-    if (!token) {
-      console.error("No token entered. Login cancelled.");
-      return 1;
+    const api = new ThinkCashBackApi(config);
+    const result = await api.authenticateGithub(code);
+    const next = { ...config, jwt: result.token };
+    // Credentials are only returned on first login; persist them immediately so
+    // impressions can be signed even before an explicit device registration.
+    if (result.credentials) {
+      next.api_key = result.credentials.apiKey;
+      next.signing_secret = result.credentials.signingSecret;
     }
-    await writeConfig({ ...config, jwt: token });
-    console.log("✓ Logged in.");
+    await writeConfig(next);
+    console.log(`✓ Logged in as ${result.developer.email}.`);
     return 0;
-  } finally {
-    rl.close();
+  } catch (err) {
+    console.error(`Login failed: ${(err as Error).message}`);
+    return 1;
   }
 }
 

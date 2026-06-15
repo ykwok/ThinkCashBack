@@ -1,5 +1,5 @@
-import * as os from "os";
 import { ThinkCashBackApi } from "../lib/api";
+import { currentPlatform, machineFingerprint } from "../lib/device";
 import { isLoggedIn, readConfig, writeConfig } from "../lib/config";
 import {
   applyInstall,
@@ -46,16 +46,16 @@ export async function install(opts: InstallOptions = {}): Promise<number> {
       try {
         const api = new ThinkCashBackApi(config);
         const reg = await api.registerDevice(config.jwt!, {
-          platform: "claude_code_cli",
-          hostname: os.hostname(),
+          machine_fingerprint: machineFingerprint(),
+          platform: currentPlatform(),
         });
         next = {
           ...config,
-          device_id: reg.device_id,
-          api_key: reg.api_key,
-          signing_secret: reg.signing_secret,
+          device_id: reg.device.id,
+          api_key: reg.apiKey,
+          signing_secret: reg.signingSecret,
         };
-        console.log(`Registered device ${reg.device_id}.`);
+        console.log(`Registered device ${reg.device.id}.`);
       } catch (err) {
         console.error(`Device registration failed: ${(err as Error).message}`);
         return 1;
