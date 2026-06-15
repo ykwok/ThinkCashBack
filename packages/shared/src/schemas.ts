@@ -43,6 +43,31 @@ export const createCampaignSchema = z.object({
 });
 export type CreateCampaign = z.infer<typeof createCampaignSchema>;
 
+/**
+ * POST /api/v1/advertisers/:id/topup body.
+ * Funds a specific campaign's budget; amount is in integer cents (>= $1.00).
+ */
+export const topupSchema = z.object({
+  campaign_id: z.string().uuid(),
+  amount_cents: z.number().int().min(100).max(100_000_000),
+  currency: z
+    .string()
+    .length(3)
+    .transform((s) => s.toLowerCase())
+    .default('usd'),
+});
+export type Topup = z.infer<typeof topupSchema>;
+
+/**
+ * POST /api/v1/me/payouts body.
+ * With no amount the full available balance is withdrawn; an explicit amount
+ * must not exceed the available balance (validated server-side).
+ */
+export const payoutRequestSchema = z.object({
+  amount_cents: z.number().int().positive().max(100_000_000).optional(),
+});
+export type PayoutRequest = z.infer<typeof payoutRequestSchema>;
+
 /** POST /api/v1/auth/github body (code exchanged for a session). */
 export const githubAuthSchema = z.object({
   code: z.string().min(1),

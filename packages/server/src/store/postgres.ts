@@ -1,26 +1,27 @@
-import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import type { Platform } from '@thinkcashback/shared';
+import { utcDayEnd, utcDayStart } from '../lib/money.js';
 import * as schema from '../db/schema.js';
-import {
-  dayPeriod,
-  impressionDevShareMillicents,
-  impressionGrossMillicents,
-  millicentsToWholeCents,
-} from '../lib/earnings.js';
+import { impressionDevShareMillicents, millicentsToWholeCents } from '../lib/earnings.js';
 import type {
   AdServingQuery,
   AdvertiserRecord,
+  BillImpressionInput,
   CampaignRecord,
   CampaignStats,
   CreateCampaignInput,
   CreateDeveloperInput,
   CreateDeviceInput,
+  CreatePaymentInput,
+  CreatePayoutInput,
   DeveloperRecord,
   DeviceRecord,
   EarningsRecord,
   ImpressionRecord,
+  PaymentRecord,
+  PayoutRecord,
   RecordImpressionInput,
   Store,
 } from './types.js';
@@ -114,6 +115,13 @@ export class PostgresStore implements Store {
     return mapAdvertiser(row);
   }
 
+  async getAdvertiserById(id: string): Promise<AdvertiserRecord | null> {
+    const row = await this.db.query.advertisers.findFirst({
+      where: eq(schema.advertisers.id, id),
+    });
+    return row ? mapAdvertiser(row) : null;
+  }
+
   async createCampaign(input: CreateCampaignInput): Promise<CampaignRecord> {
     const [row] = await this.db
       .insert(schema.campaigns)
@@ -173,73 +181,27 @@ export class PostgresStore implements Store {
   }
 
   async recordImpression(input: RecordImpressionInput): Promise<ImpressionRecord | null> {
-    return this.db.transaction(async (tx) => {
-      const inserted = await tx
-        .insert(schema.impressions)
-        .values({
-          deviceId: input.deviceId,
-          campaignId: input.campaignId,
-          nonce: input.nonce,
-          signature: input.signature,
-          ipHash: input.ipHash,
-          durationMs: input.durationMs,
-          verified: input.verified,
-        })
-        .onConflictDoNothing({
-          target: [schema.impressions.deviceId, schema.impressions.nonce],
-        })
-        .returning();
+    const inserted = await this.db
+      .insert(schema.impressions)
+      .values({
+        deviceId: input.deviceId,
+        campaignId: input.campaignId,
+        nonce: input.nonce,
+        signature: input.signature,
+        ipHash: input.ipHash,
+        durationMs: input.durationMs,
+        verified: input.verified,
+      })
+      .onConflictDoNothing({
+        target: [schema.impressions.deviceId, schema.impressions.nonce],
+      })
+      .returning();
 
-      if (inserted.length === 0) return null; // duplicate nonce
-      const row = inserted[0];
-
-      if (input.verified) {
-        // Spend is accumulated in millicents so a sub-cent per-impression amount
-        // (cpm_bid_cents/1000 cents) never truncates to zero. spent_today_cents
-        // is kept as the rounded mirror; budget exhaustion checks millicents.
-        const [campaign] = await tx
-          .update(schema.campaigns)
-          .set({
-            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents}`,
-            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents}) / 1000.0)`,
-            status: sql`CASE WHEN ${schema.campaigns.spentTodayMillicents} + ${schema.campaigns.cpmBidCents} >= ${schema.campaigns.dailyBudgetCents} * 1000 THEN 'exhausted' ELSE ${schema.campaigns.status} END`,
-          })
-          .where(eq(schema.campaigns.id, input.campaignId))
-          .returning();
-
-        // Credit the device-owning developer's earnings ledger.
-        const [owner] = await tx
-          .select({
-            developerId: schema.devices.developerId,
-            revShareBps: schema.developers.revShareBps,
-          })
-          .from(schema.devices)
-          .innerJoin(schema.developers, eq(schema.developers.id, schema.devices.developerId))
-          .where(eq(schema.devices.id, input.deviceId));
-
-        if (campaign && owner) {
-          const grossMillicents = impressionGrossMillicents(campaign.cpmBidCents);
-          const devShareMillicents = impressionDevShareMillicents(
-            campaign.cpmBidCents,
-            owner.revShareBps,
-          );
-          const { start, end } = dayPeriod(row.createdAt);
-          await tx.insert(schema.earningsLedger).values({
-            developerId: owner.developerId,
-            campaignId: input.campaignId,
-            periodStart: start,
-            periodEnd: end,
-            impressionsCount: 1,
-            grossMillicents,
-            devShareMillicents,
-            grossCents: millicentsToWholeCents(grossMillicents),
-            devShareCents: millicentsToWholeCents(devShareMillicents),
-            status: 'pending',
-          });
-        }
-      }
-      return mapImpression(row);
-    });
+    if (inserted.length === 0) return null; // duplicate nonce
+    const row = inserted[0];
+    // Budget debit + earnings accrual happen in billImpression so the sub-cent
+    // CPM charge can be billed on the cumulative impression count.
+    return mapImpression(row);
   }
 
   async countRecentImpressions(
@@ -268,6 +230,266 @@ export class PostgresStore implements Store {
       .where(eq(schema.earningsLedger.developerId, developerId))
       .orderBy(desc(schema.earningsLedger.periodStart));
     return rows.map(mapEarnings);
+  }
+
+  async billImpression(input: BillImpressionInput): Promise<void> {
+    const periodStart = utcDayStart(input.at);
+    const periodEnd = utcDayEnd(input.at);
+    const devShareMillicentsDelta = impressionDevShareMillicents(
+      input.grossMillicents,
+      input.revShareBps,
+    );
+    await this.db.transaction(async (tx) => {
+      // Spend is accumulated in millicents (source of truth) so a sub-cent
+      // per-impression amount never truncates; spent_today_cents is the rounded
+      // mirror. The funded balance is debited in whole cents on the cumulative
+      // impression count, and a campaign is exhausted once that balance hits 0.
+      if (input.chargeCents > 0) {
+        await tx
+          .update(schema.campaigns)
+          .set({
+            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}`,
+            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}) / 1000.0)`,
+            balanceCents: sql`${schema.campaigns.balanceCents} - ${input.chargeCents}`,
+            status: sql`CASE WHEN ${schema.campaigns.status} = 'active' AND ${schema.campaigns.balanceCents} - ${input.chargeCents} <= 0 THEN 'exhausted' ELSE ${schema.campaigns.status} END`,
+          })
+          .where(eq(schema.campaigns.id, input.campaignId));
+      } else {
+        await tx
+          .update(schema.campaigns)
+          .set({
+            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}`,
+            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}) / 1000.0)`,
+          })
+          .where(eq(schema.campaigns.id, input.campaignId));
+      }
+
+      // Find the still-open ledger bucket for this UTC day, or create one.
+      const existing = await tx
+        .select()
+        .from(schema.earningsLedger)
+        .where(
+          and(
+            eq(schema.earningsLedger.developerId, input.developerId),
+            eq(schema.earningsLedger.campaignId, input.campaignId),
+            eq(schema.earningsLedger.periodStart, periodStart),
+            eq(schema.earningsLedger.status, 'available'),
+          ),
+        )
+        .for('update')
+        .limit(1);
+
+      if (existing.length > 0) {
+        const bucket = existing[0];
+        const grossMillicents = (bucket.grossMillicents ?? 0) + input.grossMillicents;
+        const devShareMillicents = (bucket.devShareMillicents ?? 0) + devShareMillicentsDelta;
+        await tx
+          .update(schema.earningsLedger)
+          .set({
+            impressionsCount: bucket.impressionsCount + 1,
+            grossMillicents,
+            devShareMillicents,
+            grossCents: millicentsToWholeCents(grossMillicents),
+            devShareCents: millicentsToWholeCents(devShareMillicents),
+          })
+          .where(eq(schema.earningsLedger.id, bucket.id));
+      } else {
+        await tx.insert(schema.earningsLedger).values({
+          developerId: input.developerId,
+          campaignId: input.campaignId,
+          periodStart,
+          periodEnd,
+          impressionsCount: 1,
+          grossMillicents: input.grossMillicents,
+          devShareMillicents: devShareMillicentsDelta,
+          grossCents: millicentsToWholeCents(input.grossMillicents),
+          devShareCents: millicentsToWholeCents(devShareMillicentsDelta),
+          status: 'available',
+        });
+      }
+    });
+  }
+
+  async setDeveloperStripeConnect(
+    developerId: string,
+    connectId: string,
+  ): Promise<DeveloperRecord | null> {
+    const [row] = await this.db
+      .update(schema.developers)
+      .set({ stripeConnectId: connectId })
+      .where(eq(schema.developers.id, developerId))
+      .returning();
+    return row ? mapDeveloper(row) : null;
+  }
+
+  async createPayment(input: CreatePaymentInput): Promise<PaymentRecord> {
+    const [row] = await this.db
+      .insert(schema.payments)
+      .values({
+        advertiserId: input.advertiserId,
+        campaignId: input.campaignId,
+        amountCents: input.amountCents,
+        currency: input.currency,
+        stripePaymentIntentId: input.stripePaymentIntentId,
+        status: input.status,
+      })
+      .returning();
+    return mapPayment(row);
+  }
+
+  async setPaymentIntentId(paymentId: string, stripePaymentIntentId: string): Promise<void> {
+    await this.db
+      .update(schema.payments)
+      .set({ stripePaymentIntentId })
+      .where(eq(schema.payments.id, paymentId));
+  }
+
+  async getPaymentByIntentId(stripePaymentIntentId: string): Promise<PaymentRecord | null> {
+    const row = await this.db.query.payments.findFirst({
+      where: eq(schema.payments.stripePaymentIntentId, stripePaymentIntentId),
+    });
+    return row ? mapPayment(row) : null;
+  }
+
+  async markPaymentSucceeded(
+    stripePaymentIntentId: string,
+  ): Promise<{ payment: PaymentRecord; credited: boolean } | null> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(schema.payments)
+        .where(eq(schema.payments.stripePaymentIntentId, stripePaymentIntentId))
+        .for('update')
+        .limit(1);
+      if (!row) return null;
+      if (row.status === 'succeeded') return { payment: mapPayment(row), credited: false };
+
+      const [updated] = await tx
+        .update(schema.payments)
+        .set({ status: 'succeeded' })
+        .where(eq(schema.payments.id, row.id))
+        .returning();
+
+      await tx
+        .update(schema.campaigns)
+        .set({
+          balanceCents: sql`${schema.campaigns.balanceCents} + ${row.amountCents}`,
+          status: sql`CASE WHEN ${schema.campaigns.status} = 'exhausted' AND ${schema.campaigns.balanceCents} + ${row.amountCents} > 0 THEN 'active' ELSE ${schema.campaigns.status} END`,
+        })
+        .where(eq(schema.campaigns.id, row.campaignId));
+
+      return { payment: mapPayment(updated), credited: true };
+    });
+  }
+
+  async availableEarnings(developerId: string): Promise<EarningsRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.earningsLedger)
+      .where(
+        and(
+          eq(schema.earningsLedger.developerId, developerId),
+          eq(schema.earningsLedger.status, 'available'),
+        ),
+      );
+    return rows.map(mapEarnings);
+  }
+
+  async payoutsForDeveloper(developerId: string): Promise<PayoutRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.payouts)
+      .where(eq(schema.payouts.developerId, developerId))
+      .orderBy(desc(schema.payouts.createdAt));
+    return rows.map(mapPayout);
+  }
+
+  async createPayout(input: CreatePayoutInput): Promise<PayoutRecord> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(schema.payouts)
+        .values({
+          developerId: input.developerId,
+          amountCents: input.amountCents,
+          status: input.status,
+        })
+        .returning();
+      if (input.earningIds.length > 0) {
+        await tx
+          .update(schema.earningsLedger)
+          .set({ status: 'processing', payoutId: row.id })
+          .where(inArray(schema.earningsLedger.id, input.earningIds));
+      }
+      return mapPayout(row);
+    });
+  }
+
+  async getPayoutById(id: string): Promise<PayoutRecord | null> {
+    const row = await this.db.query.payouts.findFirst({ where: eq(schema.payouts.id, id) });
+    return row ? mapPayout(row) : null;
+  }
+
+  async getPayoutByTransferId(stripeTransferId: string): Promise<PayoutRecord | null> {
+    const row = await this.db.query.payouts.findFirst({
+      where: eq(schema.payouts.stripeTransferId, stripeTransferId),
+    });
+    return row ? mapPayout(row) : null;
+  }
+
+  async setPayoutTransfer(payoutId: string, stripeTransferId: string): Promise<void> {
+    await this.db
+      .update(schema.payouts)
+      .set({ stripeTransferId })
+      .where(eq(schema.payouts.id, payoutId));
+  }
+
+  async markPayoutPaid(payoutId: string): Promise<PayoutRecord | null> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(schema.payouts)
+        .where(eq(schema.payouts.id, payoutId))
+        .for('update')
+        .limit(1);
+      if (!row) return null;
+      if (row.status === 'paid') return mapPayout(row);
+
+      const [updated] = await tx
+        .update(schema.payouts)
+        .set({ status: 'paid' })
+        .where(eq(schema.payouts.id, payoutId))
+        .returning();
+      await tx
+        .update(schema.earningsLedger)
+        .set({ status: 'paid' })
+        .where(eq(schema.earningsLedger.payoutId, payoutId));
+      return mapPayout(updated);
+    });
+  }
+
+  async markPayoutFailed(payoutId: string): Promise<PayoutRecord | null> {
+    return this.db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(schema.payouts)
+        .set({ status: 'failed' })
+        .where(eq(schema.payouts.id, payoutId))
+        .returning();
+      if (!updated) return null;
+      await tx
+        .update(schema.earningsLedger)
+        .set({ status: 'available', payoutId: null })
+        .where(eq(schema.earningsLedger.payoutId, payoutId));
+      return mapPayout(updated);
+    });
+  }
+
+  async recordWebhookEvent(eventId: string, type: string): Promise<boolean> {
+    const inserted = await this.db
+      .insert(schema.processedWebhookEvents)
+      .values({ eventId, type })
+      .onConflictDoNothing({ target: schema.processedWebhookEvents.eventId })
+      .returning();
+    return inserted.length > 0;
   }
 
   async ping(): Promise<boolean> {
@@ -327,6 +549,7 @@ function mapCampaign(row: schema.CampaignRow): CampaignRecord {
     dailyBudgetCents: row.dailyBudgetCents,
     spentTodayCents: row.spentTodayCents,
     spentTodayMillicents: row.spentTodayMillicents,
+    balanceCents: row.balanceCents,
     status: row.status as CampaignRecord['status'],
     targetingCountries: row.targetingCountries,
     targetingPlatforms: row.targetingPlatforms as Platform[],
@@ -361,5 +584,30 @@ function mapEarnings(row: schema.EarningsRow): EarningsRecord {
     grossCents: row.grossCents,
     devShareCents: row.devShareCents,
     status: row.status as EarningsRecord['status'],
+    payoutId: row.payoutId,
+  };
+}
+
+function mapPayment(row: schema.PaymentRow): PaymentRecord {
+  return {
+    id: row.id,
+    advertiserId: row.advertiserId,
+    campaignId: row.campaignId,
+    amountCents: row.amountCents,
+    currency: row.currency,
+    stripePaymentIntentId: row.stripePaymentIntentId,
+    status: row.status as PaymentRecord['status'],
+    createdAt: row.createdAt,
+  };
+}
+
+function mapPayout(row: schema.PayoutRow): PayoutRecord {
+  return {
+    id: row.id,
+    developerId: row.developerId,
+    amountCents: row.amountCents,
+    stripeTransferId: row.stripeTransferId,
+    status: row.status as PayoutRecord['status'],
+    createdAt: row.createdAt,
   };
 }

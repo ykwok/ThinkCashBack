@@ -10,6 +10,8 @@ import type { AppBindings } from '../lib/context.js';
 import { apiKeyAuth } from '../middleware/auth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { fail, ok } from '../lib/response.js';
+import { impressionChargeCents } from '../lib/money.js';
+import { impressionGrossMillicents } from '../lib/earnings.js';
 
 export const impressionRoutes = new Hono<AppBindings>();
 
@@ -103,6 +105,21 @@ impressionRoutes.post(
     if (!inserted) {
       return fail(c, 409, 'DUPLICATE_NONCE', 'This nonce was already reported');
     }
+
+    // Bill the impression: debit the campaign budget and accrue the developer's
+    // revenue share. CPM is per 1000 impressions, so the whole-cent charge is
+    // computed on the cumulative verified-impression count (see lib/money).
+    const stats = await store.getCampaignStats(report.campaign_id);
+    const verifiedCount = stats?.impressions ?? 1;
+    const chargeCents = impressionChargeCents(verifiedCount - 1, campaign.cpmBidCents);
+    await store.billImpression({
+      campaignId: report.campaign_id,
+      developerId: developer.id,
+      grossMillicents: impressionGrossMillicents(campaign.cpmBidCents),
+      chargeCents,
+      revShareBps: developer.revShareBps,
+      at: inserted.createdAt,
+    });
 
     await store.touchDevice(report.device_id);
 

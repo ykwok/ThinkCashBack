@@ -109,6 +109,8 @@ export const campaigns = pgTable(
     spentTodayMillicents: bigint('spent_today_millicents', { mode: 'number' })
       .notNull()
       .default(0),
+    // Funded budget remaining: advertiser top-ups credit it, impressions debit it.
+    balanceCents: bigint('balance_cents', { mode: 'number' }).notNull().default(0),
     status: text('status').notNull().default('active'),
     targetingCountries: text('targeting_countries')
       .array()
@@ -178,12 +180,15 @@ export const earningsLedger = pgTable(
     grossCents: bigint('gross_cents', { mode: 'number' }).notNull().default(0),
     devShareCents: bigint('dev_share_cents', { mode: 'number' }).notNull().default(0),
     status: text('status').notNull().default('pending'),
+    // Set when the row is rolled into a payout (status -> processing/paid).
+    payoutId: uuid('payout_id').references(() => payouts.id, { onDelete: 'set null' }),
     ...mutableTimestamps,
   },
   (t) => ({
     developerIdx: index('earnings_developer_id_idx').on(t.developerId),
     campaignIdx: index('earnings_campaign_id_idx').on(t.campaignId),
     periodIdx: index('earnings_period_idx').on(t.developerId, t.periodStart),
+    payoutIdx: index('earnings_payout_id_idx').on(t.payoutId),
   }),
 );
 
@@ -204,6 +209,45 @@ export const payouts = pgTable(
   }),
 );
 
+/**
+ * Advertiser top-ups. One row per Stripe PaymentIntent; on
+ * `payment_intent.succeeded` the campaign budget is credited. The unique index
+ * on the PaymentIntent id is the webhook idempotency backstop.
+ */
+export const payments = pgTable(
+  'payments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    advertiserId: uuid('advertiser_id')
+      .notNull()
+      .references(() => advertisers.id, { onDelete: 'cascade' }),
+    campaignId: uuid('campaign_id')
+      .notNull()
+      .references(() => campaigns.id, { onDelete: 'cascade' }),
+    amountCents: bigint('amount_cents', { mode: 'number' }).notNull(),
+    currency: text('currency').notNull().default('usd'),
+    stripePaymentIntentId: text('stripe_payment_intent_id'),
+    status: text('status').notNull().default('pending'),
+    ...mutableTimestamps,
+  },
+  (t) => ({
+    advertiserIdx: index('payments_advertiser_id_idx').on(t.advertiserId),
+    campaignIdx: index('payments_campaign_id_idx').on(t.campaignId),
+    paymentIntentUq: uniqueIndex('payments_payment_intent_uq').on(t.stripePaymentIntentId),
+  }),
+);
+
+/**
+ * Processed Stripe webhook event ids. Inserting before handling gives us
+ * exactly-once processing: a duplicate delivery hits the primary key and is
+ * skipped.
+ */
+export const processedWebhookEvents = pgTable('processed_webhook_events', {
+  eventId: text('event_id').primaryKey(),
+  type: text('type').notNull(),
+  ...timestamps,
+});
+
 export type DeveloperRow = typeof developers.$inferSelect;
 export type DeviceRow = typeof devices.$inferSelect;
 export type AdvertiserRow = typeof advertisers.$inferSelect;
@@ -211,3 +255,5 @@ export type CampaignRow = typeof campaigns.$inferSelect;
 export type ImpressionRow = typeof impressions.$inferSelect;
 export type EarningsRow = typeof earningsLedger.$inferSelect;
 export type PayoutRow = typeof payouts.$inferSelect;
+export type PaymentRow = typeof payments.$inferSelect;
+export type ProcessedWebhookEventRow = typeof processedWebhookEvents.$inferSelect;
