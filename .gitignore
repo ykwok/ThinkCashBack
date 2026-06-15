@@ -8,3 +8,4 @@ coverage/
 .turbo/
 packages/server/drizzle/meta/_journal.json.bak
 .github/workflows/ci.yml
+*.tsbuildinfo
