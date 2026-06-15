@@ -1,0 +1,1 @@
+ALTER TABLE "campaigns" ADD COLUMN "billed_impressions" integer DEFAULT 0 NOT NULL;

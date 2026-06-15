@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { utcDayEnd, utcDayStart } from '../lib/money.js';
+import { impressionChargeCents, utcDayEnd, utcDayStart } from '../lib/money.js';
 import { impressionDevShareMillicents, millicentsToWholeCents } from '../lib/earnings.js';
 import type {
   AdServingQuery,
@@ -139,6 +139,7 @@ export class MemoryStore implements Store {
       spentTodayCents: 0,
       spentTodayMillicents: 0,
       balanceCents: 0,
+      billedImpressions: 0,
       status: 'active',
       targetingCountries: input.targetingCountries,
       targetingPlatforms: input.targetingPlatforms,
@@ -222,13 +223,16 @@ export class MemoryStore implements Store {
   async billImpression(input: BillImpressionInput): Promise<void> {
     const campaign = this.campaigns.get(input.campaignId);
     if (campaign) {
+      // Whole-cent budget debit is derived from the monotonic billed counter so
+      // the sub-cent CPM charge stays exact (single-process, so no lock needed).
+      const chargeCents = impressionChargeCents(campaign.billedImpressions, input.cpmBidCents);
+      campaign.billedImpressions += 1;
       // Precise spend accumulator in millicents (source of truth), with the
       // whole-cent column kept as the rounded mirror.
       campaign.spentTodayMillicents += input.grossMillicents;
       campaign.spentTodayCents = millicentsToWholeCents(campaign.spentTodayMillicents);
-      // Funded-budget debit happens in whole cents on the cumulative count.
-      if (input.chargeCents > 0) {
-        campaign.balanceCents -= input.chargeCents;
+      if (chargeCents > 0) {
+        campaign.balanceCents -= chargeCents;
         if (campaign.status === 'active' && campaign.balanceCents <= 0) {
           campaign.status = 'exhausted';
         }

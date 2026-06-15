@@ -15,6 +15,13 @@
       "when": 1781500899090,
       "tag": "0001_blue_absorbing_man",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781510211998,
+      "tag": "0002_moaning_leader",
+      "breakpoints": true
     }
   ]
 }
