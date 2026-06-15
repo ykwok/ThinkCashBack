@@ -1,0 +1,33 @@
+{
+  "name": "@thinkcashback/cli",
+  "version": "0.1.0",
+  "description": "ThinkCashBack CLI — earn revenue by displaying sponsored ads in the Claude Code thinking spinner",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "thinkcashback": "dist/index.js",
+    "thinkcashback-statusline": "dist/statusline/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "node --test --import tsx tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
