@@ -7,7 +7,6 @@ import {
   readClaudeSettings,
   writeClaudeSettings,
 } from "../lib/settings";
-import { statusLineBinPath } from "../lib/paths";
 
 interface InstallOptions {
   /** Skip real device registration; use stub credentials (offline/dev). */
@@ -63,17 +62,29 @@ export async function install(opts: InstallOptions = {}): Promise<number> {
     }
   }
 
-  // 3. Inject our ad config, capturing a backup for uninstall.
-  const { settings: updated, backup } = applyInstall(settings, statusLineBinPath());
+  // 3. Inject our ad config, wrapping any existing statusLine (e.g. claude-hud)
+  //    so the two coexist. priorBackup keeps re-install from wrapping our own
+  //    wrapper and losing the user's original.
+  const { settings: updated, backup, wrappedCommand } = applyInstall(settings, {
+    priorBackup: config.install_backup,
+  });
   await writeClaudeSettings(updated);
 
-  // 4. Persist credentials + backup with 0600 perms.
-  next = { ...next, install_backup: backup };
+  // 4. Persist credentials + the wrapped command + backup with 0600 perms.
+  next = { ...next, wrapped_status_line: wrappedCommand, install_backup: backup };
+  // Pin the API base if provided via env so the detached renderer/worker reach
+  // the right server without depending on Claude Code's launch environment.
+  if (process.env.THINKCASHBACK_API_BASE) {
+    next = { ...next, api_base: process.env.THINKCASHBACK_API_BASE };
+  }
   await writeConfig(next);
 
   console.log("✓ ThinkCashBack installed.");
-  console.log(`  • spinnerVerbs updated in ${claudeSettingsPath()}`);
-  console.log(`  • statusLine → ${statusLineBinPath()}`);
+  if (wrappedCommand) {
+    console.log(`  • statusLine in ${claudeSettingsPath()} now renders the ad below your existing status line`);
+  } else {
+    console.log(`  • statusLine in ${claudeSettingsPath()} now renders the ad`);
+  }
   console.log("Restart Claude Code to start earning. Run `thinkcashback status` anytime.");
   return 0;
 }

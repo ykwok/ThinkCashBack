@@ -1,6 +1,6 @@
 import { ThinkCashBackApi } from "../lib/api";
 import { isLoggedIn, isRegistered, readConfig } from "../lib/config";
-import { claudeSettingsPath, isAdVerb, readClaudeSettings } from "../lib/settings";
+import { claudeSettingsPath, readClaudeSettings } from "../lib/settings";
 import { isManagedStatusLine } from "../lib/paths";
 
 export async function status(): Promise<number> {
@@ -16,11 +16,8 @@ export async function status(): Promise<number> {
   if (settings === null) {
     console.log(`Installed:   no (no settings at ${claudeSettingsPath()})`);
   } else {
-    const verbs = Array.isArray(settings.spinnerVerbs) ? settings.spinnerVerbs : [];
-    const hasAdVerbs = verbs.some(isAdVerb);
     const statusLineLinked = isManagedStatusLine(settings.statusLine);
-    console.log(`Installed:   ${hasAdVerbs || statusLineLinked ? "yes" : "no"}`);
-    console.log(`  spinnerVerbs: ${hasAdVerbs ? "active" : "not set"}`);
+    console.log(`Installed:   ${statusLineLinked ? "yes" : "no"}`);
     console.log(`  statusLine:   ${statusLineLinked ? "active" : "not set"}`);
   }
 

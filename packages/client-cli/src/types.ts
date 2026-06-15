@@ -81,6 +81,12 @@ export interface LocalConfig {
   device_id?: string;
   api_key?: string;
   signing_secret?: string;
+  /**
+   * The original `statusLine` command we wrap (e.g. claude-hud), as a shell
+   * command string. The run-once renderer executes this first, then appends the
+   * ad, so the two coexist on one Claude Code statusLine slot.
+   */
+  wrapped_status_line?: string;
   /** Snapshot of the Claude Code settings fields we manage, captured at install time. */
   install_backup?: SettingsBackup;
 }
