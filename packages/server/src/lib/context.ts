@@ -1,5 +1,6 @@
 import type { Env } from '../env.js';
 import type { CounterStore } from '../redis/client.js';
+import type { StripeGateway } from './stripe.js';
 import type { DeveloperRecord, Store } from '../store/index.js';
 
 /**
@@ -12,6 +13,7 @@ export interface AppBindings {
     env: Env;
     store: Store;
     counters: CounterStore;
+    stripe: StripeGateway;
     /** Set by the apiKeyAuth / sessionAuth middleware once authenticated. */
     developer?: DeveloperRecord;
   };
@@ -21,4 +23,5 @@ export interface AppDeps {
   env: Env;
   store: Store;
   counters: CounterStore;
+  stripe: StripeGateway;
 }

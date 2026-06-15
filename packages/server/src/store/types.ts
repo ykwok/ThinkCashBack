@@ -3,6 +3,8 @@ import type {
   CampaignStatus,
   DeveloperStatus,
   EarningsStatus,
+  PaymentStatus,
+  PayoutStatus,
   Platform,
 } from '@thinkcashback/shared';
 
@@ -51,6 +53,7 @@ export interface CampaignRecord {
   cpmBidCents: number;
   dailyBudgetCents: number;
   spentTodayCents: number;
+  balanceCents: number;
   status: CampaignStatus;
   targetingCountries: string[];
   targetingPlatforms: Platform[];
@@ -79,6 +82,27 @@ export interface EarningsRecord {
   grossCents: number;
   devShareCents: number;
   status: EarningsStatus;
+  payoutId?: string | null;
+}
+
+export interface PaymentRecord {
+  id: string;
+  advertiserId: string;
+  campaignId: string;
+  amountCents: number;
+  currency: string;
+  stripePaymentIntentId: string | null;
+  status: PaymentStatus;
+  createdAt: Date;
+}
+
+export interface PayoutRecord {
+  id: string;
+  developerId: string;
+  amountCents: number;
+  stripeTransferId: string | null;
+  status: PayoutStatus;
+  createdAt: Date;
 }
 
 export interface AdServingQuery {
@@ -128,6 +152,35 @@ export interface RecordImpressionInput {
   verified: boolean;
 }
 
+export interface CreatePaymentInput {
+  advertiserId: string;
+  campaignId: string;
+  amountCents: number;
+  currency: string;
+  stripePaymentIntentId: string | null;
+  status: PaymentStatus;
+}
+
+/**
+ * One verified impression's billing effect: debit the campaign budget by
+ * `chargeCents` and accrue the developer's revenue share into the ledger.
+ */
+export interface BillImpressionInput {
+  campaignId: string;
+  developerId: string;
+  chargeCents: number;
+  revShareBps: number;
+  at: Date;
+}
+
+export interface CreatePayoutInput {
+  developerId: string;
+  amountCents: number;
+  /** Ledger rows rolled into this payout; marked processing + linked. */
+  earningIds: string[];
+  status: PayoutStatus;
+}
+
 export interface CampaignStats {
   campaignId: string;
   impressions: number;
@@ -159,6 +212,7 @@ export interface Store {
 
   // advertisers
   createAdvertiser(input: { name: string; email: string }): Promise<AdvertiserRecord>;
+  getAdvertiserById(id: string): Promise<AdvertiserRecord | null>;
 
   // campaigns
   createCampaign(input: CreateCampaignInput): Promise<CampaignRecord>;
@@ -174,6 +228,39 @@ export interface Store {
 
   // earnings
   earningsForDeveloper(developerId: string): Promise<EarningsRecord[]>;
+  /** Verified-impression billing: debit campaign budget + accrue dev share. */
+  billImpression(input: BillImpressionInput): Promise<void>;
+
+  // developer payout identity
+  setDeveloperStripeConnect(developerId: string, connectId: string): Promise<DeveloperRecord | null>;
+
+  // advertiser billing (top-ups)
+  createPayment(input: CreatePaymentInput): Promise<PaymentRecord>;
+  setPaymentIntentId(paymentId: string, stripePaymentIntentId: string): Promise<void>;
+  getPaymentByIntentId(stripePaymentIntentId: string): Promise<PaymentRecord | null>;
+  /**
+   * Mark a top-up succeeded and credit the campaign budget. Idempotent: returns
+   * `credited: false` if the payment was already succeeded.
+   */
+  markPaymentSucceeded(
+    stripePaymentIntentId: string,
+  ): Promise<{ payment: PaymentRecord; credited: boolean } | null>;
+
+  // developer payouts
+  availableEarnings(developerId: string): Promise<EarningsRecord[]>;
+  payoutsForDeveloper(developerId: string): Promise<PayoutRecord[]>;
+  createPayout(input: CreatePayoutInput): Promise<PayoutRecord>;
+  getPayoutById(id: string): Promise<PayoutRecord | null>;
+  getPayoutByTransferId(stripeTransferId: string): Promise<PayoutRecord | null>;
+  setPayoutTransfer(payoutId: string, stripeTransferId: string): Promise<void>;
+  /** Finalize a payout: payout -> paid and its linked ledger rows -> paid. */
+  markPayoutPaid(payoutId: string): Promise<PayoutRecord | null>;
+  /** Reverse a failed payout: payout -> failed, ledger rows back to available. */
+  markPayoutFailed(payoutId: string): Promise<PayoutRecord | null>;
+
+  // webhook idempotency
+  /** Record a Stripe event id; returns true the first time, false if a replay. */
+  recordWebhookEvent(eventId: string, type: string): Promise<boolean>;
 
   // lifecycle
   ping(): Promise<boolean>;

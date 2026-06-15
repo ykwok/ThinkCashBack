@@ -9,8 +9,10 @@
 export type DeveloperStatus = 'active' | 'suspended' | 'pending';
 export type AdvertiserStatus = 'active' | 'suspended';
 export type CampaignStatus = 'active' | 'paused' | 'exhausted' | 'archived';
-export type EarningsStatus = 'pending' | 'available' | 'paid';
+export type EarningsStatus = 'pending' | 'available' | 'processing' | 'paid';
 export type PayoutStatus = 'pending' | 'processing' | 'paid' | 'failed';
+/** Advertiser top-up payment lifecycle (mirrors Stripe PaymentIntent). */
+export type PaymentStatus = 'pending' | 'succeeded' | 'failed';
 export type Platform = 'darwin' | 'linux' | 'win32';
 
 export interface Developer {
@@ -40,9 +42,35 @@ export interface Campaign {
   cpmBidCents: number;
   dailyBudgetCents: number;
   spentTodayCents: number;
+  /** Funded budget remaining (credited by advertiser top-ups, debited per impression). */
+  balanceCents: number;
   status: CampaignStatus;
   targetingCountries: string[];
   targetingPlatforms: Platform[];
+  createdAt: string;
+}
+
+/** Advertiser top-up returned by POST /api/v1/advertisers/:id/topup. */
+export interface Payment {
+  id: string;
+  advertiserId: string;
+  campaignId: string;
+  amountCents: number;
+  currency: string;
+  status: PaymentStatus;
+  stripePaymentIntentId: string | null;
+  /** Returned only when a PaymentIntent is created, so the client can confirm payment. */
+  clientSecret?: string | null;
+  createdAt: string;
+}
+
+/** Developer payout returned by POST /api/v1/me/payouts. */
+export interface Payout {
+  id: string;
+  developerId: string;
+  amountCents: number;
+  status: PayoutStatus;
+  stripeTransferId: string | null;
   createdAt: string;
 }
 

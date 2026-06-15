@@ -17,6 +17,9 @@ tags:
   - name: ads
   - name: impressions
   - name: campaigns
+  - name: billing
+  - name: payouts
+  - name: webhooks
 
 paths:
   /health:
@@ -169,6 +172,115 @@ paths:
         '409': { description: Duplicate nonce / inside dedup window }
         '422': { description: Validation error }
 
+  /api/v1/advertisers/{id}/topup:
+    post:
+      tags: [billing]
+      summary: Top up a campaign budget via Stripe
+      description: >
+        Creates a Stripe PaymentIntent and a pending payment row. The campaign
+        budget (`balance_cents`) is credited only when Stripe confirms via the
+        `payment_intent.succeeded` webhook. Use the returned `clientSecret` to
+        complete payment client-side.
+      security: [{ sessionAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Topup' }
+      responses:
+        '201':
+          description: PaymentIntent created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentEnvelope' }
+        '401': { description: Missing/invalid session }
+        '404': { description: Unknown advertiser or campaign }
+        '409': { description: Campaign does not belong to advertiser }
+        '422': { description: Validation error }
+
+  /api/v1/me/connect:
+    post:
+      tags: [payouts]
+      summary: Start/resume Stripe Connect Express onboarding
+      description: >
+        Creates the developer's connected account on first call and returns a
+        fresh onboarding link each time.
+      security: [{ sessionAuth: [] }]
+      responses:
+        '200':
+          description: Onboarding link
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      connectId: { type: string }
+                      onboardingUrl: { type: string, format: uri }
+        '401': { description: Missing/invalid session }
+
+  /api/v1/me/payouts:
+    get:
+      tags: [payouts]
+      summary: List the developer's payouts
+      security: [{ sessionAuth: [] }]
+      responses:
+        '200': { description: Payout history }
+        '401': { description: Missing/invalid session }
+    post:
+      tags: [payouts]
+      summary: Withdraw available earnings via Stripe Connect
+      description: >
+        Settles the developer's available ledger balance into a Stripe transfer.
+        V1 withdraws the full available balance (>= PAYOUT_MIN_CENTS). The payout
+        starts `processing`; the `payout.paid` webhook finalizes it.
+      security: [{ sessionAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayoutRequest' }
+      responses:
+        '201':
+          description: Payout initiated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutEnvelope' }
+        '401': { description: Missing/invalid session }
+        '409': { description: No connected Stripe account }
+        '422': { description: Below minimum / partial payout unsupported }
+        '502': { description: Transfer could not be created }
+
+  /api/v1/webhooks/stripe:
+    post:
+      tags: [webhooks]
+      summary: Stripe webhook sink
+      description: >
+        Verifies the `Stripe-Signature` header against the raw body and applies
+        the event exactly once (event ids are recorded for idempotency). Handles
+        `payment_intent.succeeded`, `payout.paid`, and `payout.failed`.
+      parameters:
+        - in: header
+          name: Stripe-Signature
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Event received (and processed, or a duplicate) }
+        '400': { description: Signature verification failed }
+
 components:
   securitySchemes:
     apiKeyAuth:
@@ -200,6 +312,55 @@ components:
         targeting_platforms:
           type: array
           items: { $ref: '#/components/schemas/Platform' }
+
+    Topup:
+      type: object
+      required: [campaign_id, amount_cents]
+      properties:
+        campaign_id: { type: string, format: uuid }
+        amount_cents: { type: integer, minimum: 100, description: Minimum $1.00 }
+        currency: { type: string, minLength: 3, maxLength: 3, default: usd }
+
+    PayoutRequest:
+      type: object
+      properties:
+        amount_cents:
+          type: integer
+          minimum: 1
+          description: Optional; must equal the full available balance (V1).
+
+    PaymentEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        error: { nullable: true }
+        data:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            advertiserId: { type: string, format: uuid }
+            campaignId: { type: string, format: uuid }
+            amountCents: { type: integer }
+            currency: { type: string }
+            status: { type: string, enum: [pending, succeeded, failed] }
+            stripePaymentIntentId: { type: string, nullable: true }
+            clientSecret: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
+
+    PayoutEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        error: { nullable: true }
+        data:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            developerId: { type: string, format: uuid }
+            amountCents: { type: integer }
+            status: { type: string, enum: [pending, processing, paid, failed] }
+            stripeTransferId: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
 
     ImpressionReport:
       type: object
