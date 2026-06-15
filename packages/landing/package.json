@@ -1,0 +1,17 @@
+{
+  "name": "@thinkcashback/landing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ThinkCashBack marketing landing page — static, framework-free, generated from typed content",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node dist/build.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "node dist/preview.js",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "typescript": "^5.7.2"
+  }
+}

@@ -46,6 +46,15 @@ importers:
         specifier: ^5.5.0
         version: 5.9.3
 
+  packages/landing:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.17.10
+        version: 20.19.43
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/server:
     dependencies:
       '@hono/node-server':
