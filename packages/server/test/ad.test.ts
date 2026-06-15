@@ -11,7 +11,7 @@ describe('GET /api/v1/ad', () => {
     expect(body.error.code).toBe('UNAUTHENTICATED');
   });
 
-  it('serves the highest-bidding campaign matching the platform', async () => {
+  it('rotates among eligible campaigns weighted by bid (higher bid wins more often)', async () => {
     const h = await makeHarness();
     const advertiser = await h.store.createAdvertiser({ name: 'A', email: 'a@x.com' });
     await h.store.createCampaign({
@@ -33,15 +33,20 @@ describe('GET /api/v1/ad', () => {
       targetingPlatforms: ['darwin'],
     });
 
-    const res = await app(h).request('/api/v1/ad?platform=darwin&country=US', {
-      headers: bearer(h.apiKey),
-    });
-    expect(res.status).toBe(200);
-    const body = await json(res);
-    expect(body.success).toBe(true);
-    expect(body.data.headline).toBe('High bid');
-    expect(body.data.url).toBe('https://example.com/high');
-    expect(typeof body.data.trackingId).toBe('string');
+    const counts: Record<string, number> = { 'Low bid': 0, 'High bid': 0 };
+    // Stay under the /ad rate limit (120 / 60s) while keeping a stable sample.
+    for (let i = 0; i < 90; i++) {
+      const res = await app(h).request('/api/v1/ad?platform=darwin&country=US', {
+        headers: bearer(h.apiKey),
+      });
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      counts[body.data.headline] += 1;
+    }
+    // Both campaigns get served (rotation happens), and the higher bid dominates.
+    expect(counts['High bid']).toBeGreaterThan(0);
+    expect(counts['Low bid']).toBeGreaterThan(0);
+    expect(counts['High bid']).toBeGreaterThan(counts['Low bid']);
   });
 
   it('filters out campaigns that do not target the requested platform', async () => {

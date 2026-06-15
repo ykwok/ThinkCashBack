@@ -111,6 +111,11 @@ export const campaigns = pgTable(
       .default(0),
     // Funded budget remaining: advertiser top-ups credit it, impressions debit it.
     balanceCents: bigint('balance_cents', { mode: 'number' }).notNull().default(0),
+    // Monotonic count of impressions already billed. The whole-cent budget debit
+    // for impression N is derived from this counter under a row lock, so the
+    // sub-cent CPM charge stays exact and race-free (does not re-scan the
+    // impressions table). Never reset.
+    billedImpressions: integer('billed_impressions').notNull().default(0),
     status: text('status').notNull().default('active'),
     targetingCountries: text('targeting_countries')
       .array()

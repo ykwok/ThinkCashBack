@@ -2,7 +2,7 @@ import { promises as fs } from "fs";
 import * as os from "os";
 import * as path from "path";
 import { SettingsBackup } from "../types";
-import { isManagedStatusLine } from "./paths";
+import { isManagedStatusLine, managedStatusLine, statusLineCommand } from "./paths";
 
 /** Marker prefix that tags every spinnerVerb we inject, so we can find & remove our own. */
 export const AD_VERB_MARKER = "✶";
@@ -55,43 +55,77 @@ export async function writeClaudeSettings(settings: Settings): Promise<void> {
   await fs.rename(tmp, p);
 }
 
+export interface ApplyInstallOptions {
+  /**
+   * The backup recorded by a PRIOR install, if any. On re-install our own
+   * wrapper is already in `statusLine`, so the true pre-install value must come
+   * from here rather than from `current` (otherwise we'd wrap our own wrapper
+   * and lose the user's original, e.g. claude-hud).
+   */
+  priorBackup?: SettingsBackup;
+}
+
 /**
  * Apply ThinkCashBack ad config to a settings object (pure — does not write).
- * Returns the mutated settings plus a backup describing the pre-install state
- * so uninstall can restore exactly what the user had.
+ *
+ * `statusLine` is set to our object-format wrapper command (run-once renderer
+ * via `node`). The user's original statusLine (e.g. claude-hud) is preserved in
+ * two places: `backup.original_status_line` (for byte-faithful uninstall) and
+ * the returned `wrappedCommand` (for the renderer to re-run and append to).
  *
  * Only `spinnerVerbs` and `statusLine` are touched; all other keys are left
- * byte-for-byte intact.
+ * byte-for-byte intact. Idempotent: re-installing does not wrap our own wrapper.
  */
 export function applyInstall(
   current: Settings,
-  statusLineScriptPath: string,
-  verbs: string[] = PLACEHOLDER_VERBS
-): { settings: Settings; backup: SettingsBackup; installedAt: string } {
+  opts: ApplyInstallOptions = {}
+): {
+  settings: Settings;
+  backup: SettingsBackup;
+  wrappedCommand: string | undefined;
+  installedAt: string;
+} {
   const installedAt = new Date().toISOString();
   const next: Settings = { ...current };
 
   // --- spinnerVerbs ---
+  // NOT managed. Current Claude Code expects `spinnerVerbs` to be an object and
+  // rejects an array-shaped value — and a schema error makes it skip the ENTIRE
+  // settings file (disabling statusLine, plugins, etc.). We therefore leave
+  // spinnerVerbs untouched; ads render via statusLine only. We still record the
+  // pre-existing value so uninstall can scrub any array written by older builds.
   const existingVerbs = Array.isArray(current.spinnerVerbs)
     ? (current.spinnerVerbs as unknown[]).filter((v): v is string => typeof v === "string")
     : undefined;
-  // Preserve the user's own verbs (drop any leftover ad verbs from a prior install).
   const userVerbs = (existingVerbs ?? []).filter((v) => !isAdVerb(v));
-  next.spinnerVerbs = [...verbs, ...userVerbs];
 
   // --- statusLine ---
-  const hadStatusLine = Object.prototype.hasOwnProperty.call(current, "statusLine");
-  next.statusLine = statusLineScriptPath;
+  const reinstall = isManagedStatusLine(current.statusLine);
+  // The true pre-install statusLine: on re-install, recover it from the prior
+  // backup; otherwise it's whatever is currently there.
+  const hadStatusLine = reinstall
+    ? opts.priorBackup?.had_status_line ?? false
+    : Object.prototype.hasOwnProperty.call(current, "statusLine");
+  const originalStatusLine = reinstall
+    ? opts.priorBackup?.original_status_line
+    : hadStatusLine
+      ? current.statusLine
+      : undefined;
+
+  // The command we re-run inside the renderer is derived from the true original.
+  const wrappedCommand = statusLineCommand(originalStatusLine) ?? undefined;
+
+  next.statusLine = managedStatusLine();
 
   const backup: SettingsBackup = {
     had_spinner_verbs: existingVerbs !== undefined,
     original_spinner_verbs: userVerbs,
     had_status_line: hadStatusLine,
-    original_status_line: hadStatusLine ? current.statusLine : undefined,
+    original_status_line: hadStatusLine ? originalStatusLine : undefined,
     installed_at: installedAt,
   };
 
-  return { settings: next, backup, installedAt };
+  return { settings: next, backup, wrappedCommand, installedAt };
 }
 
 /**

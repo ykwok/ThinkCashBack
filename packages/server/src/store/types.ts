@@ -56,6 +56,8 @@ export interface CampaignRecord {
   /** Precise spend accumulator in millicents; source of truth for budget. */
   spentTodayMillicents: number;
   balanceCents: number;
+  /** Monotonic count of impressions already billed; basis for the cumulative charge. */
+  billedImpressions: number;
   status: CampaignStatus;
   targetingCountries: string[];
   targetingPlatforms: Platform[];
@@ -171,8 +173,13 @@ export interface CreatePaymentInput {
 }
 
 /**
- * One verified impression's billing effect: debit the campaign budget by
- * `chargeCents` and accrue the developer's revenue share into the ledger.
+ * One verified impression's billing effect: debit the campaign budget and
+ * accrue the developer's revenue share into the ledger.
+ *
+ * The whole-cent budget delta is computed *inside* the store, under a campaign
+ * row lock, from the campaign's monotonic `billedImpressions` counter — so
+ * concurrent impressions on the same campaign can never read a stale count and
+ * double- or under-charge the funded balance.
  */
 export interface BillImpressionInput {
   campaignId: string;
@@ -182,11 +189,8 @@ export interface BillImpressionInput {
    * Source of truth for the earnings ledger so a sub-cent share never truncates.
    */
   grossMillicents: number;
-  /**
-   * Whole-cent budget delta for this impression, billed on the cumulative
-   * impression count so sub-cent CPM charges debit the funded balance exactly.
-   */
-  chargeCents: number;
+  /** Campaign CPM bid (cents per 1000 impressions); drives the cumulative charge. */
+  cpmBidCents: number;
   revShareBps: number;
   at: Date;
 }

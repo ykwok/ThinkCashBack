@@ -3,6 +3,7 @@ import { generateToken, githubAuthSchema, sha256 } from '@thinkcashback/shared';
 import type { AppBindings } from '../lib/context.js';
 import { fail, ok } from '../lib/response.js';
 import { issueSession } from '../lib/jwt.js';
+import { encryptSecret } from '../lib/secrets.js';
 
 export const authRoutes = new Hono<AppBindings>();
 
@@ -97,8 +98,9 @@ authRoutes.post('/auth/github', async (c) => {
       githubId: identity.githubId,
       email: identity.email,
       apiKeyHash: sha256(apiKey),
-      // Stored as-is: it is the symmetric HMAC key the client signs with.
-      signingSecretHash: signingSecret,
+      // Symmetric HMAC key the client signs with — envelope-encrypted at rest
+      // (passes through as plaintext when SECRET_ENC_KEY is unset; see secrets.ts).
+      signingSecretHash: encryptSecret(signingSecret, env.SECRET_ENC_KEY),
       revShareBps: env.DEFAULT_REV_SHARE_BPS,
     });
     freshCredentials = { apiKey, signingSecret };

@@ -10,7 +10,7 @@ import type { AppBindings } from '../lib/context.js';
 import { apiKeyAuth } from '../middleware/auth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { fail, ok } from '../lib/response.js';
-import { impressionChargeCents } from '../lib/money.js';
+import { decryptSecret } from '../lib/secrets.js';
 import { impressionGrossMillicents } from '../lib/earnings.js';
 
 export const impressionRoutes = new Hono<AppBindings>();
@@ -70,7 +70,7 @@ impressionRoutes.post(
       durationMs: report.duration_ms,
     });
     const signatureValid = hmacVerify(
-      developer.signingSecretHash,
+      decryptSecret(developer.signingSecretHash, env.SECRET_ENC_KEY),
       signingPayload,
       report.signature,
     );
@@ -107,16 +107,15 @@ impressionRoutes.post(
     }
 
     // Bill the impression: debit the campaign budget and accrue the developer's
-    // revenue share. CPM is per 1000 impressions, so the whole-cent charge is
-    // computed on the cumulative verified-impression count (see lib/money).
-    const stats = await store.getCampaignStats(report.campaign_id);
-    const verifiedCount = stats?.impressions ?? 1;
-    const chargeCents = impressionChargeCents(verifiedCount - 1, campaign.cpmBidCents);
+    // revenue share. CPM is per 1000 impressions, so the whole-cent charge is a
+    // sub-cent fraction billed on the cumulative count. The count→charge→debit
+    // step runs inside billImpression under a campaign row lock so concurrent
+    // impressions on the same campaign cannot race the budget (see the store).
     await store.billImpression({
       campaignId: report.campaign_id,
       developerId: developer.id,
       grossMillicents: impressionGrossMillicents(campaign.cpmBidCents),
-      chargeCents,
+      cpmBidCents: campaign.cpmBidCents,
       revShareBps: developer.revShareBps,
       at: inserted.createdAt,
     });

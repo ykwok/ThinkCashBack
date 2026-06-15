@@ -2,7 +2,7 @@ import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import type { Platform } from '@thinkcashback/shared';
-import { utcDayEnd, utcDayStart } from '../lib/money.js';
+import { impressionChargeCents, utcDayEnd, utcDayStart } from '../lib/money.js';
 import * as schema from '../db/schema.js';
 import { impressionDevShareMillicents, millicentsToWholeCents } from '../lib/earnings.js';
 import type {
@@ -151,7 +151,10 @@ export class PostgresStore implements Store {
       .where(
         and(
           eq(schema.campaigns.status, 'active'),
-          sql`${schema.campaigns.spentTodayMillicents} < ${schema.campaigns.dailyBudgetCents} * 1000`,
+          // daily_budget_cents is int4; cast to bigint before *1000 so a daily
+          // budget above ~$21.4k (int32 max / 1000) doesn't overflow and 500 the
+          // whole ad-serving query. spent_today_millicents is already bigint.
+          sql`${schema.campaigns.spentTodayMillicents} < ${schema.campaigns.dailyBudgetCents}::bigint * 1000`,
           sql`(cardinality(${schema.campaigns.targetingPlatforms}) = 0 OR ${query.platform} = ANY(${schema.campaigns.targetingPlatforms}))`,
           query.country
             ? sql`(cardinality(${schema.campaigns.targetingCountries}) = 0 OR ${query.country} = ANY(${schema.campaigns.targetingCountries}))`
@@ -240,26 +243,33 @@ export class PostgresStore implements Store {
       input.revShareBps,
     );
     await this.db.transaction(async (tx) => {
-      // Spend is accumulated in millicents (source of truth) so a sub-cent
-      // per-impression amount never truncates; spent_today_cents is the rounded
-      // mirror. The funded balance is debited in whole cents on the cumulative
-      // impression count, and a campaign is exhausted once that balance hits 0.
-      if (input.chargeCents > 0) {
+      // Lock the campaign row first: this serializes concurrent billing for the
+      // same campaign so the cumulative-count charge can never race. We read the
+      // monotonic billed counter, derive this impression's whole-cent charge,
+      // and write the next counter value — all under the lock.
+      const [camp] = await tx
+        .select()
+        .from(schema.campaigns)
+        .where(eq(schema.campaigns.id, input.campaignId))
+        .for('update')
+        .limit(1);
+
+      if (camp) {
+        const chargeCents = impressionChargeCents(camp.billedImpressions, input.cpmBidCents);
+        const newSpentMillicents = camp.spentTodayMillicents + input.grossMillicents;
+        const newBalanceCents = chargeCents > 0 ? camp.balanceCents - chargeCents : camp.balanceCents;
+        const exhausted =
+          chargeCents > 0 && camp.status === 'active' && newBalanceCents <= 0;
         await tx
           .update(schema.campaigns)
           .set({
-            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}`,
-            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}) / 1000.0)`,
-            balanceCents: sql`${schema.campaigns.balanceCents} - ${input.chargeCents}`,
-            status: sql`CASE WHEN ${schema.campaigns.status} = 'active' AND ${schema.campaigns.balanceCents} - ${input.chargeCents} <= 0 THEN 'exhausted' ELSE ${schema.campaigns.status} END`,
-          })
-          .where(eq(schema.campaigns.id, input.campaignId));
-      } else {
-        await tx
-          .update(schema.campaigns)
-          .set({
-            spentTodayMillicents: sql`${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}`,
-            spentTodayCents: sql`round((${schema.campaigns.spentTodayMillicents} + ${input.grossMillicents}) / 1000.0)`,
+            billedImpressions: camp.billedImpressions + 1,
+            // Spend accumulated in millicents (source of truth); the cents column
+            // is the rounded mirror.
+            spentTodayMillicents: newSpentMillicents,
+            spentTodayCents: millicentsToWholeCents(newSpentMillicents),
+            balanceCents: newBalanceCents,
+            status: exhausted ? 'exhausted' : camp.status,
           })
           .where(eq(schema.campaigns.id, input.campaignId));
       }
@@ -550,6 +560,7 @@ function mapCampaign(row: schema.CampaignRow): CampaignRecord {
     spentTodayCents: row.spentTodayCents,
     spentTodayMillicents: row.spentTodayMillicents,
     balanceCents: row.balanceCents,
+    billedImpressions: row.billedImpressions,
     status: row.status as CampaignRecord['status'],
     targetingCountries: row.targetingCountries,
     targetingPlatforms: row.targetingPlatforms as Platform[],

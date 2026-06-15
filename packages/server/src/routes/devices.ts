@@ -3,6 +3,7 @@ import { generateToken, registerDeviceSchema, sha256 } from '@thinkcashback/shar
 import type { AppBindings } from '../lib/context.js';
 import { sessionAuth } from '../middleware/auth.js';
 import { fail, ok } from '../lib/response.js';
+import { encryptSecret } from '../lib/secrets.js';
 
 export const deviceRoutes = new Hono<AppBindings>();
 
@@ -18,6 +19,7 @@ export const deviceRoutes = new Hono<AppBindings>();
 deviceRoutes.post('/devices', sessionAuth, async (c) => {
   const dev = c.get('developer')!;
   const store = c.get('store');
+  const env = c.get('env');
 
   let body: unknown;
   try {
@@ -42,7 +44,11 @@ deviceRoutes.post('/devices', sessionAuth, async (c) => {
 
   const apiKey = generateToken(24);
   const signingSecret = generateToken(24);
-  await store.rotateDeveloperCredentials(dev.id, sha256(apiKey), signingSecret);
+  await store.rotateDeveloperCredentials(
+    dev.id,
+    sha256(apiKey),
+    encryptSecret(signingSecret, env.SECRET_ENC_KEY),
+  );
 
   return ok(
     c,
