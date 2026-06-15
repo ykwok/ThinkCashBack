@@ -1,0 +1,248 @@
+openapi: 3.0.3
+info:
+  title: ThinkCashBack API
+  version: 0.1.0
+  description: >
+    Backend API core for ThinkCashBack — ad serving, signed impression
+    counting, GitHub-OAuth developer auth, devices, earnings, and a minimal
+    advertiser/campaign surface. All endpoints return the common envelope.
+servers:
+  - url: http://localhost:8787
+    description: Local development
+tags:
+  - name: health
+  - name: auth
+  - name: user
+  - name: devices
+  - name: ads
+  - name: impressions
+  - name: campaigns
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness + store readiness
+      responses:
+        '200':
+          description: Service healthy
+        '503':
+          description: A dependency (store) is down
+
+  /api/v1/auth/github:
+    post:
+      tags: [auth]
+      summary: Exchange a GitHub OAuth code for a session JWT
+      description: >
+        Creates the developer on first login and returns the API key + signing
+        secret once. In non-production, a `dev:<githubId>:<email>` code is
+        accepted for testing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200': { description: Existing developer logged in }
+        '201': { description: New developer created (credentials returned once) }
+        '401': { description: OAuth exchange failed }
+        '422': { description: Missing code }
+
+  /api/v1/me:
+    get:
+      tags: [user]
+      summary: Current authenticated developer
+      security: [{ sessionAuth: [] }]
+      responses:
+        '200': { description: Developer profile }
+        '401': { description: Missing/invalid session }
+
+  /api/v1/me/earnings:
+    get:
+      tags: [user]
+      summary: Earnings summary
+      security: [{ sessionAuth: [] }]
+      responses:
+        '200':
+          description: Aggregated earnings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EarningsEnvelope' }
+        '401': { description: Missing/invalid session }
+
+  /api/v1/devices:
+    post:
+      tags: [devices]
+      summary: Register a device; (re)issue API key + signing secret
+      security: [{ sessionAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [machine_fingerprint, platform]
+              properties:
+                machine_fingerprint: { type: string }
+                platform: { $ref: '#/components/schemas/Platform' }
+                device_pubkey: { type: string, nullable: true }
+      responses:
+        '201': { description: Device registered, credentials returned once }
+        '401': { description: Missing/invalid session }
+        '422': { description: Validation error }
+
+  /api/v1/campaigns:
+    post:
+      tags: [campaigns]
+      summary: Create a campaign
+      security: [{ sessionAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCampaign' }
+      responses:
+        '201': { description: Campaign created }
+        '401': { description: Missing/invalid session }
+        '422': { description: Validation error }
+
+  /api/v1/campaigns/{id}/stats:
+    get:
+      tags: [campaigns]
+      summary: Campaign stats
+      security: [{ sessionAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Stats }
+        '401': { description: Missing/invalid session }
+        '404': { description: Unknown campaign }
+
+  /api/v1/ad:
+    get:
+      tags: [ads]
+      summary: Fetch the best-matching ad
+      security: [{ apiKeyAuth: [] }]
+      parameters:
+        - in: query
+          name: platform
+          required: true
+          schema: { $ref: '#/components/schemas/Platform' }
+        - in: query
+          name: country
+          schema: { type: string, minLength: 2, maxLength: 2 }
+        - in: query
+          name: lang
+          schema: { type: string }
+      responses:
+        '200':
+          description: An ad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdEnvelope' }
+        '401': { description: Missing/invalid API key }
+        '404': { description: No fill }
+        '422': { description: Invalid query }
+
+  /api/v1/impressions:
+    post:
+      tags: [impressions]
+      summary: Report a signed impression
+      security: [{ apiKeyAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImpressionReport' }
+      responses:
+        '201': { description: Impression accepted }
+        '401': { description: Missing API key or bad signature }
+        '403': { description: Device does not belong to developer }
+        '404': { description: Unknown campaign }
+        '409': { description: Duplicate nonce / inside dedup window }
+        '422': { description: Validation error }
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      description: Developer API key as a Bearer token.
+    sessionAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Session JWT issued by /api/v1/auth/github.
+
+  schemas:
+    Platform:
+      type: string
+      enum: [darwin, linux, win32]
+
+    CreateCampaign:
+      type: object
+      required: [headline, target_url, cpm_bid_cents, daily_budget_cents]
+      properties:
+        headline: { type: string, minLength: 3, maxLength: 140 }
+        target_url: { type: string, format: uri }
+        cpm_bid_cents: { type: integer, minimum: 1 }
+        daily_budget_cents: { type: integer, minimum: 1 }
+        targeting_countries:
+          type: array
+          items: { type: string, minLength: 2, maxLength: 2 }
+        targeting_platforms:
+          type: array
+          items: { $ref: '#/components/schemas/Platform' }
+
+    ImpressionReport:
+      type: object
+      required: [campaign_id, device_id, nonce, signature, duration_ms]
+      properties:
+        campaign_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        nonce: { type: string, minLength: 8, maxLength: 128 }
+        signature:
+          type: string
+          description: HMAC-SHA256 hex over `campaignId.deviceId.nonce.durationMs`.
+        duration_ms: { type: integer, minimum: 0 }
+
+    AdEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        error: { nullable: true }
+        data:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            headline: { type: string }
+            url: { type: string, format: uri }
+            trackingId: { type: string }
+
+    EarningsEnvelope:
+      type: object
+      properties:
+        success: { type: boolean, example: true }
+        error: { nullable: true }
+        data:
+          type: object
+          properties:
+            totalCents: { type: integer }
+            pendingCents: { type: integer }
+            paidCents: { type: integer }
+            daily:
+              type: array
+              items:
+                type: object
+                properties:
+                  date: { type: string, format: date }
+                  impressions: { type: integer }
+                  grossCents: { type: integer }
+                  devShareCents: { type: integer }

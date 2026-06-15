@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.DS_Store
+coverage/
+.turbo/
+packages/server/drizzle/meta/_journal.json.bak
+.github/workflows/ci.yml
