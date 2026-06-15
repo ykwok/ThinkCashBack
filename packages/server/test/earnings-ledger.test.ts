@@ -66,7 +66,7 @@ describe('impression -> earnings ledger', () => {
     const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const { deviceId, campaignId } = await setup(h, 100);
 
-    expect((await reportImpression(h, deviceId, campaignId, 'n-1')).status).toBe(201);
+    expect((await reportImpression(h, deviceId, campaignId, 'nonce-subcent-1')).status).toBe(201);
 
     const summary = summarizeEarnings(await h.store.earningsForDeveloper(h.developerId));
     // 100 cpm * 0.80 / 1000 = 0.08 cents — must be > 0, not floored to 0.
@@ -107,7 +107,7 @@ describe('impression -> earnings ledger', () => {
   it('accumulates campaign spend in millicents without truncating to zero', async () => {
     const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const { deviceId, campaignId } = await setup(h, 100);
-    expect((await reportImpression(h, deviceId, campaignId, 'n-spend')).status).toBe(201);
+    expect((await reportImpression(h, deviceId, campaignId, 'nonce-spend-1')).status).toBe(201);
     const campaign = await h.store.getCampaignById(campaignId);
     // gross spend = 100/1000 cents = 0.1 cents = 100 millicents (previously 0).
     expect(campaign?.spentTodayMillicents).toBe(100);
