@@ -102,6 +102,13 @@ export const campaigns = pgTable(
     cpmBidCents: integer('cpm_bid_cents').notNull(),
     dailyBudgetCents: integer('daily_budget_cents').notNull(),
     spentTodayCents: integer('spent_today_cents').notNull().default(0),
+    // Precise spend accumulator in millicents (1 cent = 1000 millicents). A
+    // single impression spends cpm_bid_cents/1000 cents — a sub-cent amount —
+    // so spent_today_cents alone truncates to zero. This column is the source
+    // of truth for budget exhaustion; spent_today_cents is the rounded mirror.
+    spentTodayMillicents: bigint('spent_today_millicents', { mode: 'number' })
+      .notNull()
+      .default(0),
     status: text('status').notNull().default('active'),
     targetingCountries: text('targeting_countries')
       .array()
@@ -163,6 +170,11 @@ export const earningsLedger = pgTable(
     periodStart: timestamp('period_start', { withTimezone: true }).notNull(),
     periodEnd: timestamp('period_end', { withTimezone: true }).notNull(),
     impressionsCount: integer('impressions_count').notNull().default(0),
+    // Precise accumulators in millicents (1 cent = 1000 millicents). Per-cent
+    // columns are kept as rounded mirrors for display; the millicent columns are
+    // the source of truth so sub-cent per-impression earnings never truncate.
+    grossMillicents: bigint('gross_millicents', { mode: 'number' }).notNull().default(0),
+    devShareMillicents: bigint('dev_share_millicents', { mode: 'number' }).notNull().default(0),
     grossCents: bigint('gross_cents', { mode: 'number' }).notNull().default(0),
     devShareCents: bigint('dev_share_cents', { mode: 'number' }).notNull().default(0),
     status: text('status').notNull().default('pending'),
