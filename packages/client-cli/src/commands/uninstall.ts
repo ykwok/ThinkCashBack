@@ -21,7 +21,7 @@ export async function uninstall(): Promise<number> {
   // Drop the install backup but KEEP credentials so the user can re-install
   // without re-registering or logging in again.
   if (config.install_backup) {
-    const { install_backup, ...rest } = config;
+    const { install_backup: _install_backup, ...rest } = config;
     await writeConfig(rest);
   }
 
