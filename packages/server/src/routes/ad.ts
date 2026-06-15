@@ -4,14 +4,15 @@ import type { AppBindings } from '../lib/context.js';
 import { apiKeyAuth } from '../middleware/auth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { fail, ok } from '../lib/response.js';
+import { pickWeightedByBid } from '../lib/adselect.js';
 
 export const adRoutes = new Hono<AppBindings>();
 
 /**
  * GET /api/v1/ad
- * Returns the highest-bidding active campaign matching platform/country.
- * The campaign pool is cached in Redis for a few seconds to keep this hot path
- * cheap; cache misses fall through to the store.
+ * Returns one active campaign matching platform/country, chosen weighted by CPM
+ * bid: higher bids serve more often but every eligible campaign keeps a chance,
+ * so lower bidders still get impressions and the client's ad bar rotates.
  */
 adRoutes.get(
   '/ad',
@@ -35,7 +36,7 @@ adRoutes.get(
       return fail(c, 404, 'NO_FILL', 'No campaign available for this request');
     }
 
-    const chosen = candidates[0];
+    const chosen = pickWeightedByBid(candidates) ?? candidates[0];
     const trackingId = generateToken(12);
     const payload: AdResponse = {
       id: chosen.id,
