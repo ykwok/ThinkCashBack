@@ -54,6 +54,7 @@ campaignRoutes.post('/campaigns', sessionAuth, async (c) => {
       targetUrl: campaign.targetUrl,
       cpmBidCents: campaign.cpmBidCents,
       dailyBudgetCents: campaign.dailyBudgetCents,
+      balanceCents: campaign.balanceCents,
       status: campaign.status,
       targetingCountries: campaign.targetingCountries,
       targetingPlatforms: campaign.targetingPlatforms,

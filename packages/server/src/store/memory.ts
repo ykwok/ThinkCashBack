@@ -1,22 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import {
-  dayPeriod,
-  impressionDevShareMillicents,
-  impressionGrossMillicents,
-  millicentsToWholeCents,
-} from '../lib/earnings.js';
+import { utcDayEnd, utcDayStart } from '../lib/money.js';
+import { impressionDevShareMillicents, millicentsToWholeCents } from '../lib/earnings.js';
 import type {
   AdServingQuery,
   AdvertiserRecord,
+  BillImpressionInput,
   CampaignRecord,
   CampaignStats,
   CreateCampaignInput,
   CreateDeveloperInput,
   CreateDeviceInput,
+  CreatePaymentInput,
+  CreatePayoutInput,
   DeveloperRecord,
   DeviceRecord,
   EarningsRecord,
   ImpressionRecord,
+  PaymentRecord,
+  PayoutRecord,
   RecordImpressionInput,
   Store,
 } from './types.js';
@@ -35,6 +36,9 @@ export class MemoryStore implements Store {
   private campaigns = new Map<string, CampaignRecord>();
   private impressions: ImpressionRecord[] = [];
   private earnings: EarningsRecord[] = [];
+  private payments = new Map<string, PaymentRecord>();
+  private payouts = new Map<string, PayoutRecord>();
+  private webhookEvents = new Set<string>();
   /** (deviceId|nonce) -> true, the dedup backstop mirroring the unique index. */
   private nonceSeen = new Set<string>();
 
@@ -120,6 +124,10 @@ export class MemoryStore implements Store {
     return record;
   }
 
+  async getAdvertiserById(id: string): Promise<AdvertiserRecord | null> {
+    return this.advertisers.get(id) ?? null;
+  }
+
   async createCampaign(input: CreateCampaignInput): Promise<CampaignRecord> {
     const record: CampaignRecord = {
       id: randomUUID(),
@@ -130,6 +138,7 @@ export class MemoryStore implements Store {
       dailyBudgetCents: input.dailyBudgetCents,
       spentTodayCents: 0,
       spentTodayMillicents: 0,
+      balanceCents: 0,
       status: 'active',
       targetingCountries: input.targetingCountries,
       targetingPlatforms: input.targetingPlatforms,
@@ -189,45 +198,8 @@ export class MemoryStore implements Store {
       createdAt: new Date(),
     };
     this.impressions.push(record);
-
-    if (input.verified) {
-      const campaign = this.campaigns.get(input.campaignId);
-      if (campaign) {
-        // CPM is per 1000 impressions; one impression spends cpm_bid_cents/1000
-        // cents — a sub-cent amount. Accumulate in millicents so it never
-        // truncates, and keep spent_today_cents as the rounded mirror.
-        campaign.spentTodayMillicents += impressionGrossMillicents(campaign.cpmBidCents);
-        campaign.spentTodayCents = millicentsToWholeCents(campaign.spentTodayMillicents);
-        if (campaign.spentTodayMillicents >= campaign.dailyBudgetCents * 1000) {
-          campaign.status = 'exhausted';
-        }
-
-        // Credit the device-owning developer's earnings ledger.
-        const device = this.devices.get(input.deviceId);
-        const developer = device ? this.developers.get(device.developerId) : undefined;
-        if (developer) {
-          const grossMillicents = impressionGrossMillicents(campaign.cpmBidCents);
-          const devShareMillicents = impressionDevShareMillicents(
-            campaign.cpmBidCents,
-            developer.revShareBps,
-          );
-          const { start, end } = dayPeriod(record.createdAt);
-          this.earnings.push({
-            id: randomUUID(),
-            developerId: developer.id,
-            campaignId: campaign.id,
-            periodStart: start,
-            periodEnd: end,
-            impressionsCount: 1,
-            grossMillicents,
-            devShareMillicents,
-            grossCents: millicentsToWholeCents(grossMillicents),
-            devShareCents: millicentsToWholeCents(devShareMillicents),
-            status: 'pending',
-          });
-        }
-      }
-    }
+    // Budget debit + earnings accrual are handled by billImpression so they
+    // can be charged on the cumulative impression count (sub-cent CPM math).
     return record;
   }
 
@@ -245,6 +217,189 @@ export class MemoryStore implements Store {
 
   async earningsForDeveloper(developerId: string): Promise<EarningsRecord[]> {
     return this.earnings.filter((e) => e.developerId === developerId);
+  }
+
+  async billImpression(input: BillImpressionInput): Promise<void> {
+    const campaign = this.campaigns.get(input.campaignId);
+    if (campaign) {
+      // Precise spend accumulator in millicents (source of truth), with the
+      // whole-cent column kept as the rounded mirror.
+      campaign.spentTodayMillicents += input.grossMillicents;
+      campaign.spentTodayCents = millicentsToWholeCents(campaign.spentTodayMillicents);
+      // Funded-budget debit happens in whole cents on the cumulative count.
+      if (input.chargeCents > 0) {
+        campaign.balanceCents -= input.chargeCents;
+        if (campaign.status === 'active' && campaign.balanceCents <= 0) {
+          campaign.status = 'exhausted';
+        }
+      }
+    }
+
+    // Accrue into the developer's still-open ledger bucket for the UTC day.
+    // Earnings are kept in millicents so a sub-cent per-impression share never
+    // truncates to zero; the cents columns are the rounded display mirror.
+    const periodStart = utcDayStart(input.at);
+    let bucket = this.earnings.find(
+      (e) =>
+        e.developerId === input.developerId &&
+        e.campaignId === input.campaignId &&
+        e.periodStart.getTime() === periodStart.getTime() &&
+        e.status === 'available',
+    );
+    if (!bucket) {
+      bucket = {
+        id: randomUUID(),
+        developerId: input.developerId,
+        campaignId: input.campaignId,
+        periodStart,
+        periodEnd: utcDayEnd(input.at),
+        impressionsCount: 0,
+        grossMillicents: 0,
+        devShareMillicents: 0,
+        grossCents: 0,
+        devShareCents: 0,
+        status: 'available',
+        payoutId: null,
+      };
+      this.earnings.push(bucket);
+    }
+    bucket.impressionsCount += 1;
+    bucket.grossMillicents = (bucket.grossMillicents ?? 0) + input.grossMillicents;
+    bucket.devShareMillicents =
+      (bucket.devShareMillicents ?? 0) +
+      impressionDevShareMillicents(input.grossMillicents, input.revShareBps);
+    bucket.grossCents = millicentsToWholeCents(bucket.grossMillicents);
+    bucket.devShareCents = millicentsToWholeCents(bucket.devShareMillicents);
+  }
+
+  async setDeveloperStripeConnect(
+    developerId: string,
+    connectId: string,
+  ): Promise<DeveloperRecord | null> {
+    const dev = this.developers.get(developerId);
+    if (!dev) return null;
+    dev.stripeConnectId = connectId;
+    return dev;
+  }
+
+  async createPayment(input: CreatePaymentInput): Promise<PaymentRecord> {
+    const record: PaymentRecord = {
+      id: randomUUID(),
+      advertiserId: input.advertiserId,
+      campaignId: input.campaignId,
+      amountCents: input.amountCents,
+      currency: input.currency,
+      stripePaymentIntentId: input.stripePaymentIntentId,
+      status: input.status,
+      createdAt: new Date(),
+    };
+    this.payments.set(record.id, record);
+    return record;
+  }
+
+  async setPaymentIntentId(paymentId: string, stripePaymentIntentId: string): Promise<void> {
+    const payment = this.payments.get(paymentId);
+    if (payment) payment.stripePaymentIntentId = stripePaymentIntentId;
+  }
+
+  async getPaymentByIntentId(stripePaymentIntentId: string): Promise<PaymentRecord | null> {
+    for (const p of this.payments.values()) {
+      if (p.stripePaymentIntentId === stripePaymentIntentId) return p;
+    }
+    return null;
+  }
+
+  async markPaymentSucceeded(
+    stripePaymentIntentId: string,
+  ): Promise<{ payment: PaymentRecord; credited: boolean } | null> {
+    const payment = await this.getPaymentByIntentId(stripePaymentIntentId);
+    if (!payment) return null;
+    if (payment.status === 'succeeded') return { payment, credited: false };
+    payment.status = 'succeeded';
+    const campaign = this.campaigns.get(payment.campaignId);
+    if (campaign) {
+      campaign.balanceCents += payment.amountCents;
+      // Re-open a campaign that was paused only by an exhausted budget.
+      if (campaign.status === 'exhausted' && campaign.balanceCents > 0) {
+        campaign.status = 'active';
+      }
+    }
+    return { payment, credited: true };
+  }
+
+  async availableEarnings(developerId: string): Promise<EarningsRecord[]> {
+    return this.earnings.filter((e) => e.developerId === developerId && e.status === 'available');
+  }
+
+  async payoutsForDeveloper(developerId: string): Promise<PayoutRecord[]> {
+    return [...this.payouts.values()]
+      .filter((p) => p.developerId === developerId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async createPayout(input: CreatePayoutInput): Promise<PayoutRecord> {
+    const record: PayoutRecord = {
+      id: randomUUID(),
+      developerId: input.developerId,
+      amountCents: input.amountCents,
+      stripeTransferId: null,
+      status: input.status,
+      createdAt: new Date(),
+    };
+    this.payouts.set(record.id, record);
+    for (const e of this.earnings) {
+      if (input.earningIds.includes(e.id)) {
+        e.status = 'processing';
+        e.payoutId = record.id;
+      }
+    }
+    return record;
+  }
+
+  async getPayoutById(id: string): Promise<PayoutRecord | null> {
+    return this.payouts.get(id) ?? null;
+  }
+
+  async getPayoutByTransferId(stripeTransferId: string): Promise<PayoutRecord | null> {
+    for (const p of this.payouts.values()) {
+      if (p.stripeTransferId === stripeTransferId) return p;
+    }
+    return null;
+  }
+
+  async setPayoutTransfer(payoutId: string, stripeTransferId: string): Promise<void> {
+    const payout = this.payouts.get(payoutId);
+    if (payout) payout.stripeTransferId = stripeTransferId;
+  }
+
+  async markPayoutPaid(payoutId: string): Promise<PayoutRecord | null> {
+    const payout = this.payouts.get(payoutId);
+    if (!payout) return null;
+    if (payout.status === 'paid') return payout;
+    payout.status = 'paid';
+    for (const e of this.earnings) {
+      if (e.payoutId === payoutId) e.status = 'paid';
+    }
+    return payout;
+  }
+
+  async markPayoutFailed(payoutId: string): Promise<PayoutRecord | null> {
+    const payout = this.payouts.get(payoutId);
+    if (!payout) return null;
+    payout.status = 'failed';
+    for (const e of this.earnings) {
+      if (e.payoutId === payoutId) {
+        e.status = 'available';
+        e.payoutId = null;
+      }
+    }
+    return payout;
+  }
+
+  async recordWebhookEvent(eventId: string): Promise<boolean> {
+    if (this.webhookEvents.has(eventId)) return false;
+    this.webhookEvents.add(eventId);
+    return true;
   }
 
   async ping(): Promise<boolean> {

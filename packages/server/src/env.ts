@@ -18,6 +18,18 @@ const envSchema = z.object({
   IP_HASH_SALT: z.string().default('tcb-dev-salt'),
   STRIPE_SECRET_KEY: z.string().default(''),
   STRIPE_CONNECT_CLIENT_ID: z.string().default(''),
+  /** Signing secret for verifying inbound Stripe webhooks (whsec_...). */
+  STRIPE_WEBHOOK_SECRET: z.string().default(''),
+  /** Default settlement currency for top-ups and payouts. */
+  STRIPE_CURRENCY: z
+    .string()
+    .length(3)
+    .transform((s) => s.toLowerCase())
+    .default('usd'),
+  /** Base URL used to build Stripe Connect onboarding return/refresh links. */
+  PUBLIC_BASE_URL: z.string().default('http://localhost:8787'),
+  /** Minimum developer balance (cents) required to request a payout. */
+  PAYOUT_MIN_CENTS: z.coerce.number().int().positive().default(1000),
 });
 
 export type Env = z.infer<typeof envSchema>;

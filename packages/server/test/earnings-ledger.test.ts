@@ -7,6 +7,13 @@ import {
   impressionGrossMillicents,
 } from '../src/lib/earnings.js';
 
+/**
+ * Earnings accrual is owned by store.billImpression (called by the impressions
+ * route after a verified impression is recorded). These tests drive the real
+ * HTTP path so they exercise the merged billing pipeline end to end, and assert
+ * that a sub-cent per-impression developer share is accrued in millicents and
+ * never truncated to zero.
+ */
 async function setup(h: Harness, cpmBidCents = 100) {
   const device = await h.store.createDevice({
     developerId: h.developerId,
@@ -26,20 +33,40 @@ async function setup(h: Harness, cpmBidCents = 100) {
   return { deviceId: device.id, campaignId: campaign.id };
 }
 
+function reportImpression(h: Harness, deviceId: string, campaignId: string, nonce: string) {
+  const durationMs = 1500;
+  const signature = hmacSign(
+    h.signingSecret,
+    impressionSigningPayload({ campaignId, deviceId, nonce, durationMs }),
+  );
+  return h.app.request('/api/v1/impressions', {
+    method: 'POST',
+    headers: { ...bearer(h.apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify({
+      campaign_id: campaignId,
+      device_id: deviceId,
+      nonce,
+      signature,
+      duration_ms: durationMs,
+    }),
+  });
+}
+
+/** Report `n` impressions, spacing them past the (1ms) dedup window. */
+async function reportMany(h: Harness, deviceId: string, campaignId: string, n: number) {
+  for (let i = 0; i < n; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 3));
+    const res = await reportImpression(h, deviceId, campaignId, `n-${campaignId}-${i}`);
+    expect(res.status).toBe(201);
+  }
+}
+
 describe('impression -> earnings ledger', () => {
   it('credits a sub-cent amount for a single verified impression (no truncation to zero)', async () => {
-    const h = await makeHarness();
+    const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const { deviceId, campaignId } = await setup(h, 100);
 
-    await h.store.recordImpression({
-      deviceId,
-      campaignId,
-      nonce: 'n-1',
-      signature: 's',
-      ipHash: null,
-      durationMs: 1500,
-      verified: true,
-    });
+    expect((await reportImpression(h, deviceId, campaignId, 'n-1')).status).toBe(201);
 
     const summary = summarizeEarnings(await h.store.earningsForDeveloper(h.developerId));
     // 100 cpm * 0.80 / 1000 = 0.08 cents — must be > 0, not floored to 0.
@@ -49,22 +76,12 @@ describe('impression -> earnings ledger', () => {
   });
 
   it('aggregates N impressions to N * cpm * 0.80 / 1000 cents', async () => {
-    const h = await makeHarness();
+    const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const cpm = 150;
     const { deviceId, campaignId } = await setup(h, cpm);
 
     const N = 5;
-    for (let i = 0; i < N; i++) {
-      await h.store.recordImpression({
-        deviceId,
-        campaignId,
-        nonce: `n-${i}`,
-        signature: 's',
-        ipHash: null,
-        durationMs: 1500,
-        verified: true,
-      });
-    }
+    await reportMany(h, deviceId, campaignId, N);
 
     const summary = summarizeEarnings(await h.store.earningsForDeveloper(h.developerId));
     expect(summary.totalCents).toBeCloseTo((N * cpm * 0.8) / 1000, 10);
@@ -73,6 +90,8 @@ describe('impression -> earnings ledger', () => {
   it('does not credit earnings for an unverified impression', async () => {
     const h = await makeHarness();
     const { deviceId, campaignId } = await setup(h, 100);
+    // recordImpression only persists the row; accrual is gated on the verified
+    // route path, so a raw unverified insert must never touch the ledger.
     await h.store.recordImpression({
       deviceId,
       campaignId,
@@ -86,17 +105,9 @@ describe('impression -> earnings ledger', () => {
   });
 
   it('accumulates campaign spend in millicents without truncating to zero', async () => {
-    const h = await makeHarness();
+    const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const { deviceId, campaignId } = await setup(h, 100);
-    await h.store.recordImpression({
-      deviceId,
-      campaignId,
-      nonce: 'n-spend',
-      signature: 's',
-      ipHash: null,
-      durationMs: 1500,
-      verified: true,
-    });
+    expect((await reportImpression(h, deviceId, campaignId, 'n-spend')).status).toBe(201);
     const campaign = await h.store.getCampaignById(campaignId);
     // gross spend = 100/1000 cents = 0.1 cents = 100 millicents (previously 0).
     expect(campaign?.spentTodayMillicents).toBe(100);
@@ -105,25 +116,7 @@ describe('impression -> earnings ledger', () => {
   it('GET /api/v1/me/earnings returns totalCents > 0 after a real signed impression', async () => {
     const h = await makeHarness({ IMPRESSION_DEDUP_WINDOW_MS: '1' });
     const { deviceId, campaignId } = await setup(h, 100);
-    const durationMs = 1500;
-    const nonce = 'nonce-e2eaaaaa';
-    const signature = hmacSign(
-      h.signingSecret,
-      impressionSigningPayload({ campaignId, deviceId, nonce, durationMs }),
-    );
-
-    const postRes = await h.app.request('/api/v1/impressions', {
-      method: 'POST',
-      headers: { ...bearer(h.apiKey), 'content-type': 'application/json' },
-      body: JSON.stringify({
-        campaign_id: campaignId,
-        device_id: deviceId,
-        nonce,
-        signature,
-        duration_ms: durationMs,
-      }),
-    });
-    expect(postRes.status).toBe(201);
+    expect((await reportImpression(h, deviceId, campaignId, 'nonce-e2eaaaaa')).status).toBe(201);
 
     const res = await h.app.request('/api/v1/me/earnings', { headers: bearer(h.sessionToken) });
     expect(res.status).toBe(200);
